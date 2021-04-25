@@ -1,0 +1,19 @@
+on:
+  push:
+    branches: [ main ]
+name: Build and deploy GH Pages
+jobs:
+  build:
+    name: Publish
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout
+      - uses: actions/checkout@v2
+      # Build & deploy
+      - name: Deploy to main branch
+        uses: shalzz/zola-deploy-action@v0.13.0
+        env:
+          # Target branch
+          PAGES_BRANCH: main
+          # Provide personal access token
+          TOKEN: ${{ secrets.TOKEN }}
