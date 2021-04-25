@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block scripts %}
+<!-- CSS -->
+<link rel="stylesheet" href="font-opensans.css" />
+<link rel="stylesheet" href="font-fira.css" />
+<link rel="stylesheet" href="main.css" />
+
+<!-- Syntax highlighting -->
+<script type="text/javascript" src="prism.js"></script>
+{% endblock scripts %}
+
+{% block content %}
+<h1 class="title">
+    {{ section.title }}
+</h1>
+<ul>
+    {% for page in section.pages %}
+    <li><a href="{{ page.permalink | safe }}">{{ page.title }}</a></li>
+    {% endfor %}
+</ul>
+{% endblock content %}
