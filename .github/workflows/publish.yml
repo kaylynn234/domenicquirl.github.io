@@ -10,10 +10,10 @@ jobs:
       # Checkout
       - uses: actions/checkout@v2
       # Build & deploy
-      - name: Deploy to main branch
+      - name: Deploy to gh-pages branch
         uses: shalzz/zola-deploy-action@v0.13.0
         env:
           # Target branch
-          PAGES_BRANCH: main
+          PAGES_BRANCH: gh-pages
           # Provide personal access token
           TOKEN: ${{ secrets.TOKEN }}
