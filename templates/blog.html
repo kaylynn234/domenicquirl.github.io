@@ -11,12 +11,17 @@
 {% endblock scripts %}
 
 {% block content %}
-<h1 class="title">
+<h1 class="title" style="padding-top: 30px; margin-bottom: 20px;">
     {{ section.title }}
 </h1>
 <ul>
     {% for page in section.pages %}
-    <li><a href="{{ page.permalink | safe }}">{{ page.title }}</a></li>
+    <li style="list-style: none; margin-bottom: 30px;">
+        <span>{{ page.date }}</span>
+        <h2 style="margin: 0;">
+            <a href="{{ page.permalink | safe }}">{{ page.title }}</a>
+        </h2>
+    </li>
     {% endfor %}
 </ul>
 {% endblock content %}

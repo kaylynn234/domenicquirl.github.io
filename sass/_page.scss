@@ -95,6 +95,8 @@ $largescreen-width: 1050px;
         p {
             margin-top: 0;
             margin-bottom: 0.85em;
+            display: block;
+            hyphens: auto;
         }
     }
 

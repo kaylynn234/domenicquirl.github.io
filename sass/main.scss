@@ -420,63 +420,6 @@ footnotes {
 // MISC SPECIAL HANDLING
 //
 
-
-table.sendsync {
-    th {
-        background-color: rgb(212, 247, 244);
-        border-bottom: rgb(200, 220, 220) 1px solid !important;
-
-        // In some places we don't want our Rust-like color scheme b/c we have conflicting
-        // background colors.
-        .token.class-name, .token.keyword {
-            color: black;
-        }
-
-    }
-
-    td:nth-child(1) {
-        background-color: rgb(212, 247, 244);
-        text-align: left;
-        font-weight: bold;
-        color: black;
-
-        // In some places we don't want our Rust-like color scheme b/c we have conflicting
-        // background colors.
-        .token.class-name, .token.keyword {
-            color: black;
-        }
-    }
-
-    th:nth-child(1) {
-        width: 130px;
-    }
-
-    th:nth-child(2) {
-        width: 300px;
-    }
-
-    th:nth-child(3) {
-        width: 300px;
-    }
-}
-
-.day-mode table.sendsync {
-    color: black;
-
-    th {
-        color: black;
-    }
-}
-
-.night-mode table.sendsync {
-    color: white;
-
-    th {
-        color: black;
-    }
-}
-
-
 .day-mode {
     span.good {
         color: green;
@@ -484,10 +427,6 @@ table.sendsync {
 
     span.bad {
         color: darkred;
-    }
-
-    span.cargo-prefix {
-        border: 1px solid rgb(200, 200, 200);
     }
 
     sup {
