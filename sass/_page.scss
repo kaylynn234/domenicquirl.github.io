@@ -58,12 +58,15 @@ $largescreen-width: 1050px;
 	    	border-radius: 3px;
         }
         code {
+            background: #272822;
+            color: #f1f1f1;
             display: inline-block;
             vertical-align: middle;
             padding: 0.1em 0.3em;
             border-radius: 3px;
             font-size: 0.835em;
             font-family: "Fira Code", Consolas, "Ubuntu Mono", Menlo, "DejaVu Sans Mono", monospace;
+	font-variant-ligatures: none;
         }
         iframe {
             border: 0;
@@ -106,8 +109,12 @@ $largescreen-width: 1050px;
         li {
             hyphens: auto;
         }
-        img {
+        img, img.horizontal {
             width: 95%;
+            height: auto;
+        }
+        img.vertical {
+            width: 75%;
             height: auto;
         }
         .image-include {
