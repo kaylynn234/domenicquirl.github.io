@@ -147,121 +147,121 @@ Next, we will something that will come in handy a lot during our implementation:
 #[macro_export]
 macro_rules! T {
     [+] => {
-        $crate::lexer::token::TokenKind::Plus
+        $crate::lexer::TokenKind::Plus
     };
     [-] => {
-        $crate::lexer::token::TokenKind::Minus
+        $crate::lexer::TokenKind::Minus
     };
     [*] => {
-        $crate::lexer::token::TokenKind::Times
+        $crate::lexer::TokenKind::Times
     };
     [/] => {
-        $crate::lexer::token::TokenKind::Slash
+        $crate::lexer::TokenKind::Slash
     };
     [^] => {
-        $crate::lexer::token::TokenKind::Pow
+        $crate::lexer::TokenKind::Pow
     };
     [=] => {
-        $crate::lexer::token::TokenKind::Eq
+        $crate::lexer::TokenKind::Eq
     };
     [.] => {
-        $crate::lexer::token::TokenKind::Dot
+        $crate::lexer::TokenKind::Dot
     };
     [,] => {
-        $crate::lexer::token::TokenKind::Comma
+        $crate::lexer::TokenKind::Comma
     };
     [_] => {
-        $crate::lexer::token::TokenKind::Underscore
+        $crate::lexer::TokenKind::Underscore
     };
     [!] => {
-        $crate::lexer::token::TokenKind::Bang
+        $crate::lexer::TokenKind::Bang
     };
     [&] => {
-        $crate::lexer::token::TokenKind::Ampersand
+        $crate::lexer::TokenKind::Ampersand
     };
     [|] => {
-        $crate::lexer::token::TokenKind::Bar
+        $crate::lexer::TokenKind::Bar
     };
     [:] => {
-        $crate::lexer::token::TokenKind::Colon
+        $crate::lexer::TokenKind::Colon
     };
     [<] => {
-        $crate::lexer::token::TokenKind::LAngle
+        $crate::lexer::TokenKind::LAngle
     };
     [>] => {
-        $crate::lexer::token::TokenKind::RAngle
+        $crate::lexer::TokenKind::RAngle
     };
     ['['] => {
-        $crate::lexer::token::TokenKind::LSquare
+        $crate::lexer::TokenKind::LSquare
     };
     [']'] => {
-        $crate::lexer::token::TokenKind::RSquare
+        $crate::lexer::TokenKind::RSquare
     };
     ['{'] => {
-        $crate::lexer::token::TokenKind::LBrace
+        $crate::lexer::TokenKind::LBrace
     };
     ['}'] => {
-        $crate::lexer::token::TokenKind::RBrace
+        $crate::lexer::TokenKind::RBrace
     };
     ['('] => {
-        $crate::lexer::token::TokenKind::LParen
+        $crate::lexer::TokenKind::LParen
     };
     [')'] => {
-        $crate::lexer::token::TokenKind::RParen
+        $crate::lexer::TokenKind::RParen
     };
     [string] => {
-        $crate::lexer::token::TokenKind::String
+        $crate::lexer::TokenKind::String
     };
     [comment] => {
-        $crate::lexer::token::TokenKind::Comment
+        $crate::lexer::TokenKind::Comment
     };
     [int] => {
-        $crate::lexer::token::TokenKind::Int
+        $crate::lexer::TokenKind::Int
     };
     [float] => {
-        $crate::lexer::token::TokenKind::Float
+        $crate::lexer::TokenKind::Float
     };
     [ident] => {
-        $crate::lexer::token::TokenKind::Identifier
+        $crate::lexer::TokenKind::Identifier
     };
     [let] => {
-        $crate::lexer::token::TokenKind::KeywordLet
+        $crate::lexer::TokenKind::KeywordLet
     };
     [fn] => {
-        $crate::lexer::token::TokenKind::KeywordFn
+        $crate::lexer::TokenKind::KeywordFn
     };
     [struct] => {
-        $crate::lexer::token::TokenKind::KeywordStruct
+        $crate::lexer::TokenKind::KeywordStruct
     };
     [if] => {
-        $crate::lexer::token::TokenKind::KeywordIf
+        $crate::lexer::TokenKind::KeywordIf
     };
     [else] => {
-        $crate::lexer::token::TokenKind::KeywordElse
+        $crate::lexer::TokenKind::KeywordElse
     };
     [&&] => {
-        $crate::lexer::token::TokenKind::And
+        $crate::lexer::TokenKind::And
     };
     [||] => {
-        $crate::lexer::token::TokenKind::Or
+        $crate::lexer::TokenKind::Or
     };
     [==] => {
-        $crate::lexer::token::TokenKind::Eqq
+        $crate::lexer::TokenKind::Eqq
     };
     [!=] => {
-        $crate::lexer::token::TokenKind::Neq
+        $crate::lexer::TokenKind::Neq
     };
     [>=] => {
-        $crate::lexer::token::TokenKind::Geq
+        $crate::lexer::TokenKind::Geq
     };
     [<=] => {
-        $crate::lexer::token::TokenKind::Leq
+        $crate::lexer::TokenKind::Leq
     };
     [error] => {
-        $crate::lexer::token::TokenKind::Error
+        $crate::lexer::TokenKind::Error
     };
     [EOF] => {
-        $crate::lexer::token::TokenKind::Eof
+        $crate::lexer::TokenKind::Eof
     };
 }
 ```
@@ -438,7 +438,295 @@ When we see `let`, how do we know it's a keyword and not the name of a variable?
 If we look at some common lexer and parser generators to see how they have you write down parsing rules (look, just because we're not using one, doesn't mean we can't take a peek, eh?), we find a large variety of regular expressions.
 Now, I may be fine with using regular expressions for the more complex tokens, but for something as simple as `+` they do seem a bit overkill.
 Also, these generators have the advantage that they can optimize the regular expressions of all tokens together, which I will not do by hand in this blog post (or probably ever).
-Let's just start with 
+Let start with the simple cases and work our way up.
+In our `lexer` mod, we create a (for now fairly uninteresting) `Lexer` struct and give it a method to lex a single token:
+```rust
+// In lexer/mod.rs
+pub struct Lexer;
+
+impl Lexer {
+    pub fn new() -> Self {
+        Self {}
+    }
+
+    /// Returns `None` if the lexer cannot find a token at the start of `input`.
+    fn valid_token(&self, input: &str) -> Option<Token> {
+        let next = input.chars().next().unwrap();
+        let (len, kind) = if let Some(kind) = unambiguous_single_char(next) {
+            (1, kind)
+        } else {
+            return None;
+        };
+
+        Some(Token {
+            kind,
+            // We will fix this later
+            span: Span { start: 0, end: len },
+        })
+    }
+}
+```
+We will put all the lexer rules in a separate file, so we'll implement `unambiguous_single_char` in a new `lexer` module `rules`:
+```rust
+// In lexer/rules.rs
+
+/// If the given character is a character that _only_ 
+/// represents a token of length 1,
+/// this method returns the corresponding `TokenKind`.
+/// Note that this method will return `None` for characters 
+/// like `=` that may also occur at the first position 
+/// of longer tokens (here `==`).
+pub(crate) const fn unambiguous_single_char(c: char) -> Option<TokenKind> {
+    Some(match c {
+        '+' => T![+],
+        '-' => T![-],
+        '*' => T![*],
+        '/' => T![/],
+        '^' => T![^],
+        '.' => T![.],
+        ',' => T![,],
+        '<' => T![<],
+        '>' => T![>],
+        '[' => T!['['],
+        ']' => T![']'],
+        '{' => T!['{'],
+        '}' => T!['}'],
+        '(' => T!['('],
+        ')' => T![')'],
+        ':' => T![:],
+        _ => return None,
+    })
+}
+```
+The method is essentially the revers of the `Display` implementation, but only for tokens that are one character long _and cannot be the start of anything else_.
+So it includes `+` and all the brackets, but, for example, it does not include `=`, because of the possible `==`.
+
+We can also start thinking about what to do when the user inputs something we don't know (yet).
+If we can't make a token at the start of the input, we'll look ahead until we can and emit an `Error` token for the characters we've had to skip over:
+```rust
+pub fn next_token(&self, input: &str) -> Token {
+    self.valid_token(input).unwrap_or_else(|| self.invalid_token(input))
+}
+
+/// Always "succeeds", because it creates an error `Token`.
+fn invalid_token(&self, input: &str) -> Token {
+    let len = input
+        .char_indices()
+        .find(|(pos, _)| self.valid_token(&input[*pos..]).is_some())
+        .map(|(pos, _)| pos)
+        .unwrap_or_else(|| input.len());
+    debug_assert!(len <= input.len());
+    Token {
+        kind: T![error],
+        span: Span {
+            start: 0,
+            end:   len as u32,
+        },
+    }
+}
+```
+At long last, we can write a function that works through an entire input string and converts it into tokens:
+```rust
+pub fn tokenize(&self, input: &str) -> Vec<Token> {
+    let mut ret = Vec::new();
+    let mut suffix = input;
+    while !suffix.is_empty() {
+        let token = self.next_token(suffix);
+        ret.push(token);
+        suffix = &suffix[token.len()..];
+    }
+    ret.push(Token {
+        kind: T![EOF],
+        span: Span {
+            start: input.len() as u32,
+            end:   input.len() as u32,
+        },
+    });
+    ret
+}
+```
+Let's create a small integration test for the tokens that should work already:
+```rust
+// In tests/it.rs
+
+use parsing_basics::{lexer::*, T};
+
+/// walks `$tokens` and compares them to the given kinds.
+macro_rules! assert_tokens {
+    ($tokens:ident, [$($kind:expr,)*]) => {
+        {
+            let mut it = $tokens.iter();
+            $(
+                let token = it.next().expect("not enough tokens");
+                assert_eq!(token.kind, $kind);
+            )*
+        }
+    };
+}
+
+#[test]
+fn single_char_tokens() {
+    let lexer = Lexer::new();
+    let input = "+-(.<>):";
+    let tokens = lexer.tokenize(input);
+    assert_tokens!(tokens, [T![+], T![-], 
+        T!['('], T![.], T![<], T![>], T![')'], T![:], T![EOF],]);
+}
+
+#[test]
+fn unknown_input() {
+    let lexer = Lexer::new();
+    let input = "{$$$$$$$+";
+    let tokens = lexer.tokenize(input);
+    assert_tokens!(tokens, [T!['{'], T![error], T![+], T![EOF],]);
+}
+```
+
+#### Making our Lexer an Iterator
+While our lexer produces the correct _kinds_ of tokens, currently all tokens are created with the span `0..1`.
+To fix that, we'll have to keep track of where the lexer is currently positioned in the input string.
+We'll take this opportunity to have the lexer take a reference to the input string.
+This means that it will now need to have a lifetime, but also has advantages - it lets us resolve tokens to their text through the lexer, and we can make the lexer an iterator:
+```rust
+// In lexer/mod.rs
+
+pub struct Lexer<'input> {
+    input:    &'input str,
+    position: u32,
+    eof:      bool,
+}
+
+impl<'input> Lexer<'input> {
+    pub fn new(input: &'input str) -> Self {
+        Self { input, position: 0, eof: false }
+    }
+
+    pub fn tokenize(&mut self) -> Vec<Token> {
+        self.collect()
+    }
+
+    // ... unchanged
+}
+
+impl<'input> Iterator for Lexer<'input> {
+    type Item = Token;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.position as usize >= self.input.len() {
+            if self.eof {
+                return None;
+            }
+            self.eof = true;
+            Some(Token {
+                kind: T![EOF],
+                span: Span {
+                    start: self.position,
+                    end:   self.position,
+                },
+            })
+        } else {
+            Some(self.next_token(&self.input[self.position as usize..]))
+        }
+    }
+}
+```
+At this point, we should be able to adapt our tests to pass the input to the lexer and they should pass as before.
+Note that all of our `Lexer` methods will now take `&mut self`, because we have to update our `position`.
+You'll have to make the `lexer` variables `mut` in the tests so everything keeps working.
+```rust
+// In tests/it.rs
+
+#[test]
+fn single_char_tokens() {
+    let input = "+-(.<>):";
+    let mut lexer = Lexer::new(input); // <- new
+    let tokens = lexer.tokenize(); // <- removed `input`
+    assert_tokens!(tokens, [T![+], T![-], 
+        T!['('], T![.], T![<], T![>], T![')'], T![:], T![EOF],]);
+}
+
+#[test]
+fn unknown_input() {
+    let input = "{$$$$$$$+";
+    let mut lexer = Lexer::new(input); // <- new
+    let tokens = lexer.tokenize(); // <- removed `input`
+    assert_tokens!(tokens, [T!['{'], T![error], T![+], T![EOF],]);
+}
+```
+Let's actually fix the spans now:
+```rust
+// In lexer/mod.rs
+
+/// Returns `None` if the lexer cannot find a token at the start of `input`.
+    fn valid_token(&mut self, input: &str) -> Option<Token> {
+        let next = input.chars().next().unwrap();
+        let (len, kind) = if let Some(kind) = unambiguous_single_char(next) {
+            (1, kind)
+        } else {
+            return None;
+        };
+
+        // NEW!
+        let start = self.position;
+        self.position += len;
+        Some(Token {
+            kind,
+            span: Span {
+                start,
+                end: start + len,
+            },
+        })
+    }
+
+    /// Always "succeeds", because it creates an error `Token`.
+    fn invalid_token(&mut self, input: &str) -> Token {
+        let start = self.position; // <- NEW!
+        let len = input
+            .char_indices()
+            .find(|(pos, _)| self.valid_token(&input[*pos..]).is_some())
+            .map(|(pos, _)| pos)
+            .unwrap_or_else(|| input.len());
+        debug_assert!(len <= input.len());
+
+        // NEW!
+        // Because `valid_token` advances our position, 
+        // we need to reset it to after the errornous token.
+        let len = len as u32;
+        self.position = start + len;
+        Token {
+            kind: T![error],
+            span: Span {
+                start,
+                end: start + len,
+            },
+        }
+    }
+```
+We'll also add a small test for token spans:
+```rust
+// In tests/it.rs
+
+#[test]
+fn token_spans() {
+    {
+        let input = "+-(.<>):";
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize();
+        let dot = tokens[3];
+        assert_eq!(dot.kind, T![.]);
+        assert_eq!(dot.span, (3..4).into())
+    }
+    {
+        let input = "{$$$$$$$+";
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize();
+        let error = tokens[1];
+        assert_eq!(error.kind, T![error]);
+        assert_eq!(error.span, (1..8).into())
+    }
+}
+```
+
 
 ### The Parser
 
