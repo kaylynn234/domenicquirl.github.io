@@ -108,6 +108,7 @@ pub enum TokenKind {
     Ampersand,
     Bar,
     Colon,
+    SemiColon,
     // Brackets
     LAngle,
     RAngle,
@@ -137,6 +138,7 @@ pub enum TokenKind {
     Leq,
     // Misc,
     Error,
+    Whitespace,
     Eof,
 }
 ```
@@ -184,6 +186,9 @@ macro_rules! T {
     };
     [:] => {
         $crate::lexer::TokenKind::Colon
+    };
+    [;] => {
+        $crate::lexer::TokenKind::SemiColon
     };
     [<] => {
         $crate::lexer::TokenKind::LAngle
@@ -260,6 +265,9 @@ macro_rules! T {
     [error] => {
         $crate::lexer::TokenKind::Error
     };
+    [ws] => {
+        $crate::lexer::TokenKind::Whitespace
+    };
     [EOF] => {
         $crate::lexer::TokenKind::Eof
     };
@@ -289,6 +297,7 @@ impl fmt::Display for TokenKind {
                 T![&] => "&",
                 T![|] => "|",
                 T![:] => ":",
+                T![;] => ";",
                 // Brackets
                 T![<] => "<",
                 T![>] => ">",
@@ -318,6 +327,7 @@ impl fmt::Display for TokenKind {
                 T![<=] => "<=",
                 // Misc 
                 T![error] => "<?>",
+                T![ws] => "<WS>",
                 T![EOF] => "<EOF>",
             }
         )
@@ -481,12 +491,9 @@ pub(crate) const fn unambiguous_single_char(c: char) -> Option<TokenKind> {
         '+' => T![+],
         '-' => T![-],
         '*' => T![*],
-        '/' => T![/],
         '^' => T![^],
         '.' => T![.],
         ',' => T![,],
-        '<' => T![<],
-        '>' => T![>],
         '[' => T!['['],
         ']' => T![']'],
         '{' => T!['{'],
@@ -494,12 +501,14 @@ pub(crate) const fn unambiguous_single_char(c: char) -> Option<TokenKind> {
         '(' => T!['('],
         ')' => T![')'],
         ':' => T![:],
+        ';' => T![;],
         _ => return None,
     })
 }
 ```
 The method is essentially the revers of the `Display` implementation, but only for tokens that are one character long _and cannot be the start of anything else_.
-So it includes `+` and all the brackets, but, for example, it does not include `=`, because of the possible `==`.
+So it includes `+` and most of the brackets, but, for example, it does not include `=`, because of the possible `==`, and `/`, because that can also be the start of a comment.
+Angle brackets are absent because they can also be the start of `<=` and `>=`[^shift-ops]<span id="fn-shift-ops"></span>.
 
 We can also start thinking about what to do when the user inputs something we don't know (yet).
 If we can't make a token at the start of the input, we'll look ahead until we can and emit an `Error` token for the characters we've had to skip over:
@@ -567,10 +576,10 @@ macro_rules! assert_tokens {
 #[test]
 fn single_char_tokens() {
     let lexer = Lexer::new();
-    let input = "+-(.<>):";
+    let input = "+-(.):";
     let tokens = lexer.tokenize(input);
     assert_tokens!(tokens, [T![+], T![-], 
-        T!['('], T![.], T![<], T![>], T![')'], T![:], T![EOF],]);
+        T!['('], T![.], T![')'], T![:], T![EOF],]);
 }
 
 #[test]
@@ -638,11 +647,11 @@ You'll have to make the `lexer` variables `mut` in the tests so everything keeps
 
 #[test]
 fn single_char_tokens() {
-    let input = "+-(.<>):";
+    let input = "+-(.):";
     let mut lexer = Lexer::new(input); // <- new
     let tokens = lexer.tokenize(); // <- removed `input`
     assert_tokens!(tokens, [T![+], T![-], 
-        T!['('], T![.], T![<], T![>], T![')'], T![:], T![EOF],]);
+        T!['('], T![.], T![')'], T![:], T![EOF],]);
 }
 
 #[test]
@@ -709,7 +718,7 @@ We'll also add a small test for token spans:
 #[test]
 fn token_spans() {
     {
-        let input = "+-(.<>):";
+        let input = "+-(.):";
         let mut lexer = Lexer::new(input);
         let tokens = lexer.tokenize();
         let dot = tokens[3];
@@ -727,9 +736,415 @@ fn token_spans() {
 }
 ```
 
+#### Whitespace
+
+Whitespace is special enough for us to handle on its own, mainly because there will probably be a lot of it and it is also a class which can never conflict with anything else - either a character is whitespace, or it is not.
+Successive whitespace characters are also grouped together into a single token:
+```rust
+// In lexer/mod.rs
+
+/// Returns `None` if the lexer cannot find a token at the start of `input`.
+fn valid_token(&mut self, input: &str) -> Option<Token> {
+    let next = input.chars().next().unwrap();
+    let (len, kind) = if next.is_whitespace() {
+        (
+            input
+                .char_indices()
+                .take_while(|(_, c)| c.is_whitespace())
+                .last()
+                .unwrap() // we know there is at least one whitespace character
+                .0 as u32
+                + 1,
+            T![ws],
+        )
+    } else if let Some(kind) = unambiguous_single_char(next) {
+        (1, kind)
+    } else {
+        return None;
+    };
+
+    // create the token, unchanged
+}
+```
+We can copy one of our basic tests and add some whitespace to see this works:
+```rust
+// In tests/it.rs
+#[test]
+fn single_char_tokens_with_whitespace() {
+    let input = "   + -  (.): ";
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize();
+    let leading_space = &tokens[0];
+    assert_eq!(leading_space.kind, T![ws]);
+    assert_eq!(leading_space.len(), 3);
+
+    let space_after_minus = &tokens[4];
+    assert_eq!(space_after_minus.kind, T![ws]);
+    assert_eq!(space_after_minus.len(), 2);
+
+    let trailing_space = &tokens[9];
+    assert_eq!(trailing_space.kind, T![ws]);
+    assert_eq!(trailing_space.len(), 1);
+
+    let tokens: Vec<_> = tokens
+        .into_iter()
+        .filter(|t| t.kind != T![ws])
+        .collect();
+    assert_tokens!(
+        tokens,
+        [T![+], T![-], T!['('], T![.], T![')'], T![:], T![EOF],]
+    );
+}
+```
+
+#### Other Rules
+
+We've seen before that for the remaining tokens we need a general mechanism to determine which class they belong to.
+We'll say that a general lexer rule is a function which returns if and how many input characters it could match to the token kind it is for and start with the remaining one- and two-character tokens and the keywords:
+```rust
+// In lexer/rules.rs
+pub(crate) struct Rule {
+    pub kind:    TokenKind,
+    pub matches: fn(&str) -> Option<u32>,
+}
+
+fn match_single_char(input: &str, c: char) -> Option<u32> {
+    input.chars().next()
+        .and_then(|ch| if ch == c { Some(1) } else { None })
+}
+
+fn match_two_chars(input: &str, first: char, second: char) -> Option<u32> {
+    if input.len() >= 2 {
+        match_single_char(input, first)
+            .and_then(|_| {
+                match_single_char(&input[1..], second)
+                    .map(|_| 2)
+            })
+    } else {
+        None
+    }
+}
+
+fn match_keyword(input: &str, keyword: &str) -> Option<u32> {
+    input.starts_with(keyword)
+        .then(|| keyword.len() as u32)
+}
+
+pub(crate) fn get_rules() -> Vec<Rule> {
+    vec![
+        Rule {
+            kind:    T![!],
+            matches: |input| match_single_char(input, '!'),
+        },
+        Rule {
+            kind:    T![=],
+            matches: |input| match_single_char(input, '='),
+        },
+        Rule {
+            kind:    T![/],
+            matches: |input| match_single_char(input, '/'),
+        },
+        Rule {
+            kind:    T![_],
+            matches: |input| match_single_char(input, '_'),
+        },
+        Rule {
+            kind:    T![<],
+            matches: |input| match_single_char(input, '<'),
+        },
+        Rule {
+            kind:    T![>],
+            matches: |input| match_single_char(input, '>'),
+        },
+        Rule {
+            kind:    T![==],
+            matches: |input| match_two_chars(input, '=', '='),
+        },
+        Rule {
+            kind:    T![!=],
+            matches: |input| match_two_chars(input, '!', '='),
+        },
+        Rule {
+            kind:    T![&&],
+            matches: |input| match_two_chars(input, '&', '&'),
+        },
+        Rule {
+            kind:    T![||],
+            matches: |input| match_two_chars(input, '|', '|'),
+        },
+        Rule {
+            kind:    T![<=],
+            matches: |input| match_two_chars(input, '<', '='),
+        },
+        Rule {
+            kind:    T![>=],
+            matches: |input| match_two_chars(input, '>', '='),
+        },
+        Rule {
+            kind:    T![let],
+            matches: |input| match_keyword(input, "let"),
+        },
+        Rule {
+            kind:    T![fn],
+            matches: |input| match_keyword(input, "fn"),
+        },
+        Rule {
+            kind:    T![struct],
+            matches: |input| match_keyword(input, "struct"),
+        },
+        Rule {
+            kind:    T![if],
+            matches: |input| match_keyword(input, "if"),
+        },
+        Rule {
+            kind:    T![else],
+            matches: |input| match_keyword(input, "else"),
+        },
+    ]
+}
+```
+In the lexer, we plug in the new rules where the input is neither whitespace nor clearly a single character:
+```rust
+// In lexer/mod.rs
+pub struct Lexer<'input> {
+    input:    &'input str,
+    position: u32,
+    eof:      bool,
+    rules:    Vec<Rule>, // <- NEW!
+}
+
+
+impl<'input> Lexer<'input> {
+    pub fn new(input: &'input str) -> Self {
+        Self {
+            input,
+            position: 0,
+            eof: false,
+            rules: rules::get_rules(), // <- NEW!
+        }
+    }
+
+    /// Returns `None` if the lexer cannot find a token at the start of `input`.
+    fn valid_token(&mut self, input: &str) -> Option<Token> {
+        let next = input.chars().next().unwrap();
+        let (len, kind) = if next.is_whitespace() {
+            // snip
+        } else if let Some(kind) = unambiguous_single_char(next) {
+            (1, kind)
+        } else {
+            self.rules
+                .iter()
+                // `max_by_key` returns the last element if multiple
+                // rules match, but we want earlier rules to "win" 
+                // against later ones
+                .rev()
+                .filter_map(|rule| Some(((rule.matches)(input)?, rule.kind)))
+                .max_by_key(|&(len, _)| len)?
+        };
+
+        // create the token, unchanged
+    }
+
+    // ...remaining functions unchanged
+}
+```
+If the simpler cases don't trigger, we iterate over all our rules and, for each `rule`, check if it `matches` the `input`.
+We then select _the rule that matches the longest piece of the input_, that is, the most input characters.
+This choice is commonly known as [the "maximal munch" principle](https://en.m.wikipedia.org/wiki/Maximal_munch) and makes it so two successive `=` become `==`[^max-munch]<span id="fn-max-munch"></span>.
+Moreover, it is consistent with grouping a sequence of digits all together as an `Int`, or letters as an `Identifier` (which we'll do next).
+Note also that we decide to resolve conflicts between tokens of _the same length_ by choosing the rule that was written first.
+We will write the rules from least to most general, so things like identifiers will be plugged in at the back.
+
+Speaking of identifiers, we'll make some quick tests for our new rules and then we'll finally handle them.
+Here are the new tests:
+```rust
+// In tests/it.rs
+#[test]
+fn maybe_multiple_char_tokens() {
+    let input = "&&=<=_!=||";
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize();
+    assert_tokens!(tokens, [
+        T![&&], T![=], T![<=], T![_], T![!=], T![||], T![EOF],
+    ]);
+
+
+#[test]
+fn keywords() {
+    let input = "if let = struct else fn";
+    let mut lexer = Lexer::new(input);
+    let tokens: Vec<_> = lexer.tokenize().into_iter()
+        .filter(|t| t.kind != T![ws]).collect();
+    assert_tokens!(tokens, [
+        T![if], T![let], T![=], T![struct], T![else], T![fn], T![EOF],
+    ]);
+}
+```
+
+Let's get to the big boys.
+For this post, we _will_ use regular expressions here.
+This means we need to add the `regex` crate to the project.
+Since we'll need to put our regexes somewhere, we also add the `lazy_static` crate.
+While we're at it, we add `unindent` as a `dev-dependency` as well.
+`unindent` is a small utility to, well, unindent text, to help us write a full test for the lexer after we've added the missing rules.
+Because users of our lexer don't run the tests, they don't need to have `unindent`, which is why it doesn't go into the regular `dependencies`:
+```toml
+[dependencies]
+regex = "1"
+lazy_static = "1"
+
+[dev-dependencies]
+unindent = "0.1"
+```
+We add a matching function for regex-based rules which queries the regex (conveniently, `Regex::find` returns an `Option`) and the regexes themselves.
+We then make new rules that use `match_regex` and extend our ruleset with them.
+I skipped `T![int]` integer literals with the regexes and instead gave them their own little rule which works the same way we handle whitespace (it's still important to have a rule for this though, because integers and floats can conflict):
+```rust
+// In lexer/rules.rs
+
+fn match_regex(input: &str, r: &Regex) -> Option<u32> {
+    r.find(input).map(|regex_match| regex_match.end() as u32)
+}
+
+lazy_static! {
+    static ref STRING_REGEX: Regex = 
+        Regex::new(r#"^"((\\"|\\\\)|[^\\"])*""#).unwrap();
+    static ref COMMENT_REGEX: Regex = 
+        Regex::new(r#"^//[^\n]*\n"#).unwrap();
+    static ref FLOAT_REGEX: Regex = 
+        Regex::new(r#"^((\d+(\.\d+)?)|(\.\d+))([Ee](\+|-)?\d+)?"#).unwrap();
+    static ref IDENTIFIER_REGEX: Regex = 
+        Regex::new(r##"^([A-Za-z]|_)([A-Za-z]|_|\d)*"##).unwrap();
+}
+
+pub(crate) fn get_rules() -> Vec<Rule> {
+    vec![
+        // ...rules from before
+        Rule {
+            kind:    T![string],
+            matches: move |input| match_regex(input, &STRING_REGEX),
+        },
+        Rule {
+            kind:    T![comment],
+            matches: move |input| match_regex(input, &COMMENT_REGEX),
+        },
+        Rule {
+            kind:    T![int],
+            matches: |input| {
+                input
+                    .char_indices()
+                    .take_while(|(_, c)| c.is_ascii_digit())
+                    .last()
+                    .map(|(pos, _)| pos as u32 + 1)
+            },
+        },
+        Rule {
+            kind:    T![float],
+            matches: |input| match_regex(input, &FLOAT_REGEX),
+        },
+        Rule {
+            kind:    T![ident],
+            matches: |input| match_regex(input, &IDENTIFIER_REGEX),
+        },
+    ]
+}
+```
+Have a look at [the `regex` crate's documentation](https://docs.rs/regex/1.5.3/regex/#syntax) to learn how the regular expressions are specified.
+I write them in _raw string literals_, which go from `r#"` to `"#`.
+All regular expressions are _anchored_ with the starting `^`, which forces them to match the input from the start and excludes matches anywhere else later in the input.
+Then, a string is a sequence of characters in quotation marks (`"`), optionally including an escaped quotation mark (`\"`) or backslash (`\\`).
+A line comment starts with `//` and ends at the end of the line.
+A floating point number is some digits, maybe followed by a period and more digits, or alternatively it may also start with the period.
+It may be followed by `E` or `e`, an optional sign and more digits to allow scientific notation.
+An identifier is any variable name, for which we require to start with a letter or underscore, and then also allow digits for the characters after the first.
+
+Time to try it out!
+We'll add two tests, a function and a struct definition:
+```rust
+// In tests/it.rs
+#[test]
+fn function() {
+    let input = r#"
+        // tests stuff
+        fn test(var: Type, var2_: bool) {
+            let x = "String content \" test" + 7 / 27.3e-2^4;
+            let chars = x.chars();
+            if let Some(c) = chars.next() {
+                x = x + c;
+            } else if !var2_ {
+                x = x + ",";
+            }
+        }
+    "#;
+    let input = unindent(input);
+    let mut lexer = Lexer::new(input.as_str());
+    let tokens: Vec<_> = lexer.tokenize().into_iter()
+        .filter(|t| t.kind != T![ws]).collect();
+    assert_tokens!(tokens, [
+        // comment
+        T![comment], 
+        // function signature
+        T![fn], T![ident], T!['('], 
+            T![ident], T![:], T![ident], T![,], 
+            T![ident], T![:], T![ident], 
+        T![')'], T!['{'], 
+            // `x` assignment
+            T![let], T![ident], T![=], T![string], T![+], T![int], 
+                T![/], T![float], T![^], T![int], T![;], 
+            // `chars` assignment
+            T![let], T![ident], T![=], T![ident], 
+                T![.], T![ident], T!['('], T![')'], T![;],
+            // if
+            T![if], T![let], T![ident], T!['('], T![ident], T![')'], T![=], 
+                T![ident], T![.], T![ident], T!['('], T![')'], 
+            T!['{'], 
+                // `x` re-assignment
+                T![ident], T![=], T![ident], T![+], T![ident], T![;],
+            // else if
+            T!['}'], T![else], T![if], T![!], T![ident], T!['{'], 
+                // `x` re-assignment
+                T![ident], T![=], T![ident], T![+], T![string], T![;], 
+            T!['}'], // end if
+        T!['}'], // end fn
+        T![EOF],
+    ]);
+}
+
+#[test]
+fn struct_def() {
+    let input = r#"
+        struct Foo<T> {
+            bar: Bar<T>,
+        }
+    "#;
+    let input = unindent(input);
+    let mut lexer = Lexer::new(input.as_str());
+    let tokens: Vec<_> = lexer.tokenize().into_iter().filter(|t| t.kind != T![ws]).collect();
+    assert_tokens!(tokens, [
+        // struct definition/type
+        T![struct], T![ident], T![<], T![ident], T![>], T!['{'], 
+            // member `bar` of type `Bar<T>`
+            T![ident], T![:], T![ident], T![<], T![ident], T![>],T![,], 
+        T!['}'], // end struct
+        T![EOF],
+    ]);
+    let bar = tokens[6];
+    assert_eq!(bar.span, (20..23).into()); // unindented span
+}
+```
+One lexer, done.<br><br>
+Note that the comment before the `fn test` is correctly recognized as a comment, while in the assignment to `x` there is a single `/` for division.
+This is because the comment is longer than a single slash, so it wins against the single character rule.
+The same happens for the floating point number in the same assignment.
+Our keywords are also recognized correctly.
+They do match as identifiers as well, but their rules are declared earlier than the identifier rule, so our lexer gives them precedence.
 
 ### The Parser
 
 ---
 [^stmt-expr]: In Rust, this is somewhat confusing, because most expressions can also be statements. For example, you can `break` a value from a `loop`. <a href="#fn-stmt-expr" class="footnote-backref" role="doc-backlink">↩︎</a>
+
+[^shift-ops]: We will not add binary left- and right-shift operators (`<<` and `>>`) in this post, but if we did they'd be another source of ambiguity here. <a href="#fn-shift-ops" class="footnote-backref" role="doc-backlink">↩︎</a>
+
+[^max-munch]: Be careful for which character sequences you introduce combined lexer tokens. Equality operators are usually fine, but for some character combinations munching them maximally may clash with other viable implementations. See the "Drawbacks" section of the Wikipedia article for some examples. <a href="#fn-max-munch" class="footnote-backref" role="doc-backlink">↩︎</a>
  

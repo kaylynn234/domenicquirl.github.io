@@ -176,6 +176,10 @@ $largescreen-width: 1050px;
     
     .footnote-definition { 
         padding-bottom: 20px;
+
+        p {
+            margin-top: 5px;
+        }
     }
 }
 
