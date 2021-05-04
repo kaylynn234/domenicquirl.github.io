@@ -2527,6 +2527,96 @@ fn parse_function() {
 }
 ```
 
+#### Files
+We're running the victory lap now!
+We'll make a parser method to parse an entire file, as a sequence of items:
+```rust
+// In parser/hierarchy.rs
+
+pub fn file(&mut self) -> Vec<ast::Item> {
+    let mut items = Vec::new();
+    while !self.at(T![EOF]) {
+        let item = self.item();
+        items.push(item);
+    }
+    items
+}
+```
+And a last, glorious test:
+```rust
+// In tests/it.rs
+
+#[test]
+fn parse_file() {
+    fn parse(input: &str) -> Vec<ast::Item> {
+        let mut parser = Parser::new(input);
+        parser.file()
+    }
+
+    let items = parse(
+        unindent(
+            r#"
+        fn wow_we_did_it(x: String, bar: Bar<Baz<T>, U>) {
+            let x = 7 + sin(y);
+            {
+                x = 3;
+                if (bar < 3) {
+                    x = x + 1;
+                    y = 3 * x;
+                } else if (bar < 2) {
+                    let i = 2!;
+                    x = x + i;
+                } else {
+                    x = 1;
+                }
+            }
+        }
+
+        struct Foo<T, U> {
+            x: String,
+            bar: Bar<Baz<T>, U>
+        }
+    "#,
+        )
+        .as_str(),
+    );
+
+    let function = &items[0];
+    match function {
+        ast::Item::Function { name, parameters, body } => {
+            assert_eq!(name, "wow_we_did_it");
+            assert_eq!(parameters.len(), 2);
+            assert_eq!(body.len(), 2);
+        }
+        _ => unreachable!(),
+    };
+
+    let struct_ = &items[1];
+    match struct_ {
+        ast::Item::Struct { name, members } => {
+            assert_eq!(
+                name,
+                &ast::Type {
+                    name:     "Foo".to_string(),
+                    generics: vec![
+                        ast::Type {
+                            name:     "T".to_string(),
+                            generics: vec![],
+                        },
+                        ast::Type {
+                            name:     "U".to_string(),
+                            generics: vec![],
+                        }
+                    ],
+                }
+            );
+            assert_eq!(members.len(), 2);
+        }
+        _ => unreachable!(),
+    };
+}
+```
+
 ## A Note on Error Handling
 As we have written it now, our parser will `panic` when it encounters something it doesn't understand.
 This is something all of us do from time to time, and there's no need to be ashamed about it.
