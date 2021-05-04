@@ -2067,7 +2067,6 @@ T![if] => {
         ast::Stmt::Block { stmts } => stmts,
         _ => unreachable!(),
     };
-    self.consume(T!['}']);
 
     let else_stmt = if self.at(T![else]) {
         self.consume(T![else]);
@@ -2093,6 +2092,7 @@ T!['{'] => {
         let stmt = self.statement();
         stmts.push(stmt);
     }
+    self.consume(T!['}']);
     ast::Stmt::Block { stmts }
 }
 ```
@@ -2239,6 +2239,291 @@ fn parse_statements() {
         }
         _ => unreachable!(),
     }
+}
+```
+
+#### Items
+Let's move up another level to items containing statements.
+We'll do struct and function definitions, for which we'll also need a notion of what a type looks like in our language.
+As before, our reward for doing statements is that we're now allowed to use `self.statement()` to parse the function body.
+Time to [play that same song again!](https://www.youtube.com/watch?v=_JmBsOywqzE)
+```rust
+// In parser/ast.rs
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Item {
+    Struct {
+        name:    Type,
+        members: Vec<(String, Type)>,
+    },
+    Function {
+        name:       String,
+        parameters: Vec<(String, Type)>,
+        body:       Vec<Stmt>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Type {
+    pub name:     String,
+    pub generics: Vec<Type>,
+}
+```
+As you can see, a `Type` is really just an identifier plus a list of generic parameters.
+We use that for both function parameters and struct members, and also for the struct definition itself, to allow defining structs like `Foo<T, U>`.
+Parsing types uses a recursive loop over the generic parameters (which are themselves types, like in `Bar<Baz<T>>`):
+```rust
+// In parser/hierarchy.rs
+
+pub fn type_(&mut self) -> ast::Type {
+    let ident = self.next()
+        .expect("Tried to parse type, but there were no more tokens");
+    assert_eq!(
+        ident.kind,
+        T![ident],
+        "Expected identifier at start of type, but found `{}`",
+        ident.kind
+    );
+    let name = self.text(ident).to_string();
+
+    let mut generics = Vec::new();
+
+    if self.at(T![<]) {
+        self.consume(T![<]);
+        while !self.at(T![>]) {
+            // Generic parameters are also types
+            let generic = self.type_();
+            generics.push(generic);
+            if self.at(T![,]) {
+                self.consume(T![,]);
+            }
+        }
+        self.consume(T![>]);
+    }
+
+    ast::Type { name, generics }
+}
+```
+We'll implement struct definitions first.
+They are very similar - instead of generic parameters we loop over members, which are identifiers followed by `:` and their type:
+```rust
+pub fn item(&mut self) -> ast::Item {
+    match self.peek() {
+        T![fn] => todo!(),
+        T![struct] => {
+            self.consume(T![struct]);
+            let mut members = Vec::new();
+            let name = self.type_();
+            self.consume(T!['{']);
+            while !self.at(T!['}']) {
+                let member_ident = self
+                    .next()
+                    .expect("Tried to parse struct member, 
+                        but there were no more tokens");
+                assert_eq!(
+                    member_ident.kind,
+                    T![ident],
+                    "Expected identifier as struct member, but found `{}`",
+                    member_ident.kind
+                );
+                let member_name = self.text(member_ident).to_string();
+                self.consume(T![:]);
+                let member_type = self.type_();
+                members.push((member_name, member_type));
+                if self.at(T![,]) {
+                    self.consume(T![,]);
+                }
+            }
+            self.consume(T!['}']);
+            ast::Item::Struct { name, members }
+        }
+        kind => panic!("Unknown start of item: `{}`", kind),
+    }
+}
+```
+We can test types and struct definitions already:
+```rust
+// In tests/it.rs
+
+#[test]
+fn parse_struct() {
+    fn parse(input: &str) -> ast::Item {
+        let mut parser = Parser::new(input);
+        parser.item()
+    }
+
+    let item = parse(
+        unindent(
+            r#"
+        struct Foo<T, U> {
+            x: String,
+            bar: Bar<Baz<T>, U>
+        }
+    "#,
+        )
+        .as_str(),
+    );
+
+    match item {
+        ast::Item::Struct { name, members } => {
+            assert_eq!(
+                name,
+                ast::Type {
+                    name:     "Foo".to_string(),
+                    generics: vec![
+                        ast::Type {
+                            name:     "T".to_string(),
+                            generics: vec![],
+                        },
+                        ast::Type {
+                            name:     "U".to_string(),
+                            generics: vec![],
+                        }
+                    ],
+                }
+            );
+            assert_eq!(members.len(), 2);
+            let (bar, bar_type) = &members[1];
+            assert_eq!(bar, "bar");
+            assert_eq!(
+                bar_type,
+                &ast::Type {
+                    name:     "Bar".to_string(),
+                    generics: vec![
+                        ast::Type {
+                            name:     "Baz".to_string(),
+                            generics: vec![ast::Type {
+                                name:     "T".to_string(),
+                                generics: vec![],
+                            }],
+                        },
+                        ast::Type {
+                            name:     "U".to_string(),
+                            generics: vec![],
+                        }
+                    ],
+                }
+            );
+        }
+        _ => unreachable!(),
+    };
+}
+```
+
+The function case should start to look familiar to you by now; it's a loop over parameters!
+Additionally, we use the same trick as for `if` to parse the function body:
+```rust
+// In parser/hierarchy.rs, `Parser::item`
+
+T![fn] => {
+    self.consume(T![fn]);
+    let mut parameters = Vec::new();
+
+    let ident = self
+        .next()
+        .expect("Tried to parse struct member, but there were no more tokens");
+    assert_eq!(
+        ident.kind,
+        T![ident],
+        "Expected identifier as struct member, but found `{}`",
+        ident.kind
+    );
+    let name = self.text(ident).to_string();
+
+    self.consume(T!['(']);
+    while !self.at(T![')']) {
+        let parameter_ident = self
+            .next()
+            .expect("Tried to parse struct member, 
+                but there were no more tokens");
+        assert_eq!(
+            parameter_ident.kind,
+            T![ident],
+            "Expected identifier as struct member, but found `{}`",
+            parameter_ident.kind
+        );
+        let parameter_name = self.text(parameter_ident).to_string();
+        self.consume(T![:]);
+        let parameter_type = self.type_();
+        parameters.push((parameter_name, parameter_type));
+        if self.at(T![,]) {
+            self.consume(T![,]);
+        }
+    }
+    self.consume(T![')']);
+
+    assert!(self.at(T!['{']), "Expected a block after function header");
+    let body = match self.statement() {
+        ast::Stmt::Block { stmts } => stmts,
+        _ => unreachable!(),
+    };
+
+    ast::Item::Function { name, parameters, body }
+}
+```
+We'll add a test for functions as well:
+```rust
+// In tests/it.rs
+
+#[test]
+fn parse_function() {
+    fn parse(input: &str) -> ast::Item {
+        let mut parser = Parser::new(input);
+        parser.item()
+    }
+
+    let item = parse(
+        unindent(
+            r#"
+        fn wow_we_did_it(x: String, bar: Bar<Baz<T>, U>) {
+            let x = 7 + sin(y);
+            {
+                x = 3;
+                if (bar < 3) {
+                    x = x + 1;
+                    y = 3 * x;
+                } else if (bar < 2) {
+                    let i = 2!;
+                    x = x + i;
+                } else {
+                    x = 1;
+                }
+            }
+        }
+    "#,
+        )
+        .as_str(),
+    );
+
+    match item {
+        ast::Item::Function { name, parameters, body } => {
+            assert_eq!(name, "wow_we_did_it");
+            assert_eq!(parameters.len(), 2);
+            let (bar, bar_type) = &parameters[1];
+            assert_eq!(bar, "bar");
+            assert_eq!(
+                bar_type,
+                &ast::Type {
+                    name:     "Bar".to_string(),
+                    generics: vec![
+                        ast::Type {
+                            name:     "Baz".to_string(),
+                            generics: vec![ast::Type {
+                                name:     "T".to_string(),
+                                generics: vec![],
+                            }],
+                        },
+                        ast::Type {
+                            name:     "U".to_string(),
+                            generics: vec![],
+                        }
+                    ],
+                }
+            );
+            assert_eq!(body.len(), 2);
+        }
+        _ => unreachable!(),
+    };
 }
 ```
 
