@@ -3,8 +3,6 @@ title = "Where to Start Hand-Writing a Parser (in Rust)"
 date = 2021-04-26
 +++
 
-# TODO: expressions
-
 I'm in [the Rust community Discord server](https://www.rust-lang.org/community).
 Particularly, I hang around in their language development channel (regularly called `#lang-dev`, but its name is ever changing).
 The folks in the server come with varying experience in Rust, and `#lang-dev` is frequented by Rustaceans of vastly different skill levels and knowledge backgrounds when it comes to actually working on a programming language.
@@ -145,7 +143,7 @@ pub enum TokenKind {
 ```
 You can see we have a lot of single-character tokens in there (including left and right brackets of all types), and then the groupings of strings and comments, numbers, and identifiers and keywords, as well as kinds to group things like `&&` or `!=` together.
 We also have the `Error` kind in case we see a character we don't understand, and the `Eof` kind, which stands for "end of file" and will be the last token produced by the lexer.
-Next, we will something that will come in handy a lot during our implementation: we will define a macro for referencing token kinds:
+Next, we will do something that will come in handy a lot during our implementation: we will define a macro for referencing token kinds:
 ```rust
 #[macro_export]
 macro_rules! T {
@@ -1980,6 +1978,269 @@ For a greater challenge, array indexing can be handled as a combination of postf
 There's all kinds of expressions left for you to do, but we now have to move on to...
 
 #### Statements
+As a reward for our hard work on expressions, we are now allowed to parse anything that _indludes_ an expression.
+The next level up from expressions are _statements_, of which we will consider variable definitions with `let` and re-assignments without `let`, as well as `if` statements (we'll also need a representation of explicit `{}` scopes):
+```rust
+// In parser/ast.rs
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Stmt {
+    Let {
+        var_name: String,
+        value:    Box<Expr>,
+    },
+    Assignment {
+        var_name: String,
+        value:    Box<Expr>,
+    },
+    IfStmt {
+        condition: Box<Expr>,
+        body:      Vec<Stmt>,
+        else_stmt: Option<Box<Stmt>>,
+    },
+    Block {
+        stmts: Vec<Stmt>,
+    },
+}
+```
+We'll make a new module called `hierarchy` for statements and beyond and start the same way as for expressions:
+```rust
+// In parser/hierarchy.rs
+
+impl<'input, I> Parser<'input, I>
+where
+    I: Iterator<Item = Token>,
+{
+    pub fn statement(&mut self) -> ast::Stmt {
+        match self.peek() {
+            _ => todo!(),
+        }
+    }
+}
+```
+The declaration and the `let` differ only by the `let` keyword:
+```rust
+T![let] => {
+    self.consume(T![let]);
+    let ident = self.next().expect("Expected identifier after `let`");
+    assert_eq!(
+        ident.kind,
+        T![ident],
+        "Expected identifier after `let`, but found `{}`",
+        ident.kind
+    );
+    let name = self.text(ident).to_string();
+    self.consume(T![=]);
+    let value = self.expression();
+    self.consume(T![;]);
+    ast::Stmt::Let {
+        var_name: name,
+        value:    Box::new(value),
+    }
+}
+T![ident] => {
+    let ident = self.next().unwrap();
+    let name = self.text(ident).to_string();
+    self.consume(T![=]);
+    let value = self.expression();
+    self.consume(T![;]);
+    ast::Stmt::Assignment {
+        var_name: name,
+        value:    Box::new(value),
+    }
+}
+```
+Note how we now just call `self.expression()` to parse the value assigned to the variable.
+It will do all the expression parsing work for us and return us a nice `ast::Expr` to use in our `ast::Stmt`.
+The `if` case is a bit more involved, because we need to handle the condition, the statements inside the `if` and also possible a `else`.
+We can make our lives a bit easier by re-using the block scope statement for the body:
+```rust
+T![if] => {
+    self.consume(T![if]);
+    self.consume(T!['(']);
+    let condition = self.expression();
+    self.consume(T![')']);
+
+    assert!(self.at(T!['{']), "Expected a block after `if` statement");
+    let body = self.statement();
+    let body = match body {
+        ast::Stmt::Block { stmts } => stmts,
+        _ => unreachable!(),
+    };
+    self.consume(T!['}']);
+
+    let else_stmt = if self.at(T![else]) {
+        self.consume(T![else]);
+        assert!(
+            self.at(T![if]) || self.at(T!['{']),
+            "Expected a block or an `if` after `else` statement"
+        );
+        Some(Box::new(self.statement()))
+    } else {
+        None
+    };
+
+    ast::Stmt::IfStmt {
+        condition: Box::new(condition),
+        body,
+        else_stmt,
+    }
+}
+T!['{'] => {
+    self.consume(T!['{']);
+    let mut stmts = Vec::new();
+    while !self.at(T!['}']) {
+        let stmt = self.statement();
+        stmts.push(stmt);
+    }
+    ast::Stmt::Block { stmts }
+}
+```
+The statement test will be our longest test so far:
+```rust
+// In tests/it.rs
+
+#[test]
+fn parse_statements() {
+    fn parse(input: &str) -> ast::Stmt {
+        let mut parser = Parser::new(input);
+        parser.statement()
+    }
+
+    let stmt = parse(
+        unindent(
+            r#"
+        {
+            let x = 7 + sin(y);
+            {
+                x = 3;
+                if (bar < 3) {
+                    x = x + 1;
+                    y = 3 * x;
+                } else if (bar < 2) {
+                    let i = 2!;
+                    x = x + i;
+                } else {
+                    x = 1;
+                }
+            }
+        }
+    "#,
+        )
+        .as_str(),
+    );
+
+    let stmts = match stmt {
+        ast::Stmt::Block { stmts } => stmts,
+        _ => unreachable!(),
+    };
+    assert_eq!(stmts.len(), 2);
+
+    let let_stmt = &stmts[0];
+    match let_stmt {
+        ast::Stmt::Let { var_name, .. } => assert_eq!(var_name, "x"),
+        _ => unreachable!(),
+    }
+
+    let stmts = match &stmts[1] {
+        ast::Stmt::Block { stmts } => stmts,
+        _ => unreachable!(),
+    };
+    assert_eq!(stmts.len(), 2);
+
+    let assignment_stmt = &stmts[0];
+    match assignment_stmt {
+        ast::Stmt::Assignment { var_name, .. } => assert_eq!(var_name, "x"),
+        _ => unreachable!(),
+    }
+
+    let if_stmt = &stmts[1];
+    match if_stmt {
+        ast::Stmt::IfStmt {
+            condition,
+            body,
+            else_stmt,
+        } => {
+            assert!(matches!(
+                &**condition,
+                ast::Expr::InfixOp {
+                    op:  T![<],
+                    lhs: _lhs,
+                    rhs: _rhs,
+                }
+            ));
+            assert_eq!(body.len(), 2);
+            let x_assignment = &body[0];
+            match x_assignment {
+                ast::Stmt::Assignment { var_name, .. } => 
+                    assert_eq!(var_name, "x"),
+                _ => unreachable!(),
+            }
+            let y_assignment = &body[1];
+            match y_assignment {
+                ast::Stmt::Assignment { var_name, .. } => 
+                    assert_eq!(var_name, "y"),
+                _ => unreachable!(),
+            }
+
+            let else_stmt = match else_stmt {
+                Some(stmt) => &**stmt,
+                None => unreachable!(),
+            };
+
+            match else_stmt {
+                ast::Stmt::IfStmt {
+                    condition,
+                    body,
+                    else_stmt,
+                } => {
+                    assert!(matches!(
+                        &**condition,
+                        ast::Expr::InfixOp {
+                            op:  T![<],
+                            lhs: _lhs,
+                            rhs: _rhs,
+                        }
+                    ));
+                    assert_eq!(body.len(), 2);
+                    let let_i = &body[0];
+                    match let_i {
+                        ast::Stmt::Let { var_name, .. } => 
+                            assert_eq!(var_name, "i"),
+                        _ => unreachable!(),
+                    }
+                    let x_assignment = &body[1];
+                    match x_assignment {
+                        ast::Stmt::Assignment { var_name, .. } => 
+                            assert_eq!(var_name, "x"),
+                        _ => unreachable!(),
+                    }
+
+                    let else_stmt = match else_stmt {
+                        Some(stmt) => &**stmt,
+                        None => unreachable!(),
+                    };
+
+                    let stmts = match else_stmt {
+                        ast::Stmt::Block { stmts } => stmts,
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(stmts.len(), 1);
+
+                    let x_assignment = &stmts[0];
+                    match x_assignment {
+                        ast::Stmt::Assignment { var_name, .. } => 
+                            assert_eq!(var_name, "x"),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            };
+        }
+        _ => unreachable!(),
+    }
+}
+```
 
 ## A Note on Error Handling
 As we have written it now, our parser will `panic` when it encounters something it doesn't understand.
