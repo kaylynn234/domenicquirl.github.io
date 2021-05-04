@@ -92,6 +92,7 @@ In there, we make an `enum` of the kinds of tokens we will have:
 
 ```rust
 // In token.rs
+
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub enum TokenKind {
     // Single characters
@@ -369,6 +370,7 @@ However, `Range` has some quirks that make it less nice to work with than I woul
 Let's thus make our own small `Span` type that can be converted to and from `Range<usize>`:
 ```rust
 // In token.rs
+
 #[derive(Eq, PartialEq, Clone, Copy, Hash, Default, Debug)]
 pub struct Span {
     /// inclusive
@@ -452,6 +454,7 @@ Let start with the simple cases and work our way up.
 In our `lexer` mod, we create a (for now fairly uninteresting) `Lexer` struct and give it a method to lex a single token:
 ```rust
 // In lexer/mod.rs
+
 pub struct Lexer;
 
 impl Lexer {
@@ -769,6 +772,7 @@ fn valid_token(&mut self, input: &str) -> Option<Token> {
 We can copy one of our basic tests and add some whitespace to see this works:
 ```rust
 // In tests/it.rs
+
 #[test]
 fn single_char_tokens_with_whitespace() {
     let input = "   + -  (.): ";
@@ -803,6 +807,7 @@ We've seen before that for the remaining tokens we need a general mechanism to d
 We'll say that a general lexer rule is a function which returns if and how many input characters it could match to the token kind it is for and start with the remaining one- and two-character tokens and the keywords:
 ```rust
 // In lexer/rules.rs
+
 pub(crate) struct Rule {
     pub kind:    TokenKind,
     pub matches: fn(&str) -> Option<u32>,
@@ -906,6 +911,7 @@ pub(crate) fn get_rules() -> Vec<Rule> {
 In the lexer, we plug in the new rules where the input is neither whitespace nor clearly a single character:
 ```rust
 // In lexer/mod.rs
+
 pub struct Lexer<'input> {
     input:    &'input str,
     position: u32,
@@ -959,6 +965,7 @@ Speaking of identifiers, we'll make some quick tests for our new rules and then 
 Here are the new tests:
 ```rust
 // In tests/it.rs
+
 #[test]
 fn maybe_multiple_char_tokens() {
     let input = "&&=<=_!=||";
@@ -1062,6 +1069,7 @@ Time to try it out!
 We'll add two tests, a function and a struct definition:
 ```rust
 // In tests/it.rs
+
 #[test]
 fn function() {
     let input = r#"
@@ -1159,6 +1167,440 @@ fn struct_def() {
 One lexer, done.<br><br>
 
 ### The Parser
+
+Our next big task is to re-arrange the lexer tokens into a nice tree that represents our input program.
+We'll need a little bit of setup, starting with defining the AST we want to parse into.
+All of our parser-related stuff will go into a new `parser` module with submodules, like `ast`:
+```rust
+// In parser/ast.rs
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Literal(Lit),
+    Ident(String),
+    FnCall { fn_name: String, args: Vec<Expr> },
+    PrefixOp { op: TokenKind, expr: Box<Expr> },
+    InfixOp { op: TokenKind, lhs: Box<Expr>, rhs: Box<Expr> },
+    PostfixOp { op: TokenKind, expr: Box<Expr> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lit {
+    Int(usize),
+    Float(f64),
+    Str(String),
+}
+```
+We have 3 kinds of literal, corresponding to `T![int]`, `T![float]` and `T![string]`.
+Identifiers store their name, and function call expressions store the name of the function and what was passed as its arguments.
+The arguments are themselves expressions, because you can call functions like `sin(x + max(y, bar.z))`.
+
+
+Expressions with operators are categorized into three classes:
+ - **Prefix** operators are unary operators that come before an expression, like in `-2.4` or `!this_is_a_bool`. 
+ - **Postfix** operators are also unary operators, but those that come _after_ an expression. For us, this will only be the faculty operator `4!`.
+ - **Infix** operators are the binary operators like `a + b` or `c ^ d`, where `a` and `c` would be the left-hand sides `lhs`, and `b` and `d` are the right-hand sides `rhs`.
+This is not the only way to structure your AST.
+Some people prefer having an explicit `Expr` variant for each operator, so you'd have `Expr::Add`, `Expr::Sub`, `Expr::Not` and so on.
+If you use those then of course you don't have to store the kind of operator in the AST, but I'm going with the more generic approach here, both because I personally prefer it and because it means less copy-pasting and smaller code blocks for this article.
+
+Note that the AST _discards_ some information: 
+When calling a function `bar(x, 2)`, I have to write not only the name and arguments, but also parentheses and commas.
+Whitespace is also nowhere to be found, and I can tell you already that we will not have any methods that handle comments (well, apart from figuring out how we don't have to deal with them).
+This is a major reason why the AST is called the **abstract** syntax tree; we keep input data only if it matters to us.
+For other application, like an IDE, those things that we throw away here may matter a great deal, e.g., to format a file or show documentation.
+In such cases, other representations are often used, such as **concrete** syntax trees (CSTs) that retain a lot more information.
+
+#### Parser Input
+
+I can tell you from personal experience that having to manually skip over whitespace and comments everywhere in a parser is not fun.
+When we made the lexer tests in the last section, we filtered out all such tokens from the lexer output before comparing them to what we expected, except where we specifically wanted to test the whitespace handling.
+In principle, our parser will have a `Lexer` iterator inside and query it for new tokens when it needs them.
+The `Iterator::filter` adapter that we used in the tests has the annoying property, however, that it is really hard to name, because its predicate (the function that decides what to filter out) is part of its type.
+We will thus build our own small iterator around the lexer, which will filter the tokens for us:
+```rust
+// In parser/mod.rs
+
+pub struct TokenIter<'input> {
+    lexer: Lexer<'input>,
+}
+
+impl<'input> TokenIter<'input> {
+    pub fn new(input: &'input str) -> Self {
+        Self { lexer: Lexer::new(input) }
+    }
+}
+
+impl<'input> Iterator for TokenIter<'input> {
+    type Item = Token;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let next_token = self.lexer.next()?;
+            if !matches!(next_token.kind, T![ws] | T![comment]) {
+                return Some(next_token);
+            } // else continue
+        }
+    }
+}
+```
+I don't think we've used the `matches!` macro before.
+It is basically just a short form of writing
+```rust
+match next_token.kind {
+    T![ws] | T![comment] => true,
+    _ => false,
+}
+```
+though I admit `!matches!` always looks kinda funny.
+Our parser can then be built like this:
+```rust
+// In parser/mod.rs
+
+pub struct Parser<'input, I>
+where
+    I: Iterator<Item = Token>,
+{
+    input:  &'input str,
+    tokens: Peekable<I>,
+}
+
+impl<'input> Parser<'input, TokenIter<'input>> {
+    pub fn new(input: &'input str) -> Parser<'input, TokenIter<'input>> {
+        Parser {
+            input,
+            tokens: TokenIter::new(input).peekable(),
+        }
+    }
+}
+```
+The downside of the "lexer as iterator" approach is shining through a bit here, since we now have to carry around the `'input` lifetime and the `where` bound (and also we had to make `TokenIter` in the first place).
+However, we'll mostly be able to forget about it for the actual parsing methods.
+
+`Peekable` is an iterator adapter from the standard library, which fortunately can be named more easily than `Filter`.
+It wraps an iterator and allows us to `peek()` inside.
+This lets us look ahead one token to see what's coming, without removing the token from the iterator.
+We will use this _a lot_.
+
+Let's start with the basic methods of our parser:
+```rust
+
+impl<'input, I> Parser<'input, I>
+where
+    I: Iterator<Item = Token>,
+{
+    /// Get the source text of a token.
+    pub fn text(&self, token: Token) -> &'input str {
+        token.text(&self.input)
+    }
+
+    /// Look-ahead one token and see what kind of token it is.
+    pub(crate) fn peek(&mut self) -> TokenKind {
+        self.tokens.peek().map(|token| token.kind).unwrap_or(T![EOF])
+    }
+
+    /// Check if the next token is some `kind` of token.
+    pub(crate) fn at(&mut self, kind: TokenKind) -> bool {
+        self.peek() == kind
+    }
+
+    /// Get the next token.
+    pub(crate) fn next(&mut self) -> Option<Token> {
+        self.tokens.next()
+    }
+
+    /// Move forward one token in the input and check 
+    /// that we pass the kind of token we expect.
+    pub(crate) fn consume(&mut self, expected: TokenKind) {
+        let token = self.next().expect(&format!(
+            "Expected to consume `{}`, but there was no next token",
+            expected
+        ));
+        assert_eq!(
+            token.kind, expected,
+            "Expected to consume `{}`, but found `{}`",
+            expected, token.kind
+        );
+    }
+}
+```
+
+To start building our parse tree, the first step will be expressions.
+They'll end up occupying quite a bit of space, so they also go in their own module:
+```rust
+// In parser/expressions.rs
+
+impl<'input, I> Parser<'input, I>
+where
+    I: Iterator<Item = Token>,
+{
+    pub fn parse_expression(&mut self) -> ast::Expr {
+        match self.peek() {
+            _ => todo!()   
+        }
+    }
+}
+```
+As you can see, we'll be using `peek()` to figure out what expression is coming our way.
+We start with the most basic expression of them all: literals
+```rust
+lit @ T![int] | lit @ T![float] | lit @ T![string] => {
+    let literal_text = {
+        // the calls on `self` need to be split, because `next` takes `&mut self`
+        // if `peek` is not `T![EOF]`, then there must be a next token
+        let literal_token = self.next().unwrap();
+        self.text(literal_token)
+    };
+    let lit = match lit {
+        T![int] => ast::Lit::Int(
+            literal_text
+                .parse()
+                .expect(&format!(
+                    "invalid integer literal: `{}`", 
+                    literal_text)
+                ),
+        ),
+        T![float] => ast::Lit::Float(
+            literal_text
+                .parse()
+                .expect(&format!(
+                    "invalid floating point literal: `{}`", 
+                    literal_text)
+                ),
+        ),
+        T![string] => ast::Lit::Str(
+            // trim the quotation marks
+            literal_text[1..(literal_text.len() - 1)].to_string()
+        ),
+        _ => unreachable!(),
+    };
+    ast::Expr::Literal(lit)
+}
+```
+I use two `match`es here so I can share the code for actions we have to take for all literals, which is resolving their text and creating an `ast::Expr::Literal` expression for them.
+The `lit @ T![int]` syntax is something that you may not have come across before.
+It gives a name to the kind that is matched, so that I can use it again in the second match.
+The result is equivalent to calling `let lit = self.peek()` again at the start of the outer match.
+
+In the inner `match`, we create the correct `ast::Lit` literal types depending on the type of the token.
+It does feel a bit like cheating to use a function called `parse()` to implement our parser, but it's what the standard library gives us and I'm for sure not gonna write string-to-number conversion routines by hand for this post.
+Even if I wanted to, other people have already done that work for me - for your implementation, you might also want to have look at [`lexical`](https://crates.io/crates/lexical) or even [`lexical_core`](https://crates.io/crates/lexical-core).
+
+Next on the list are identifiers, which are interesting because they might just be a reference to a variable `bar`, but they might also be the start of a call to the function `bar(x, 2)`.
+Our friend `peek()` (or, in this case, `at()`) will help us solve this dilemma again:
+```rust
+T![ident] => {
+    let name = {
+        let ident_token = self.next().unwrap();
+        self.text(ident_token).to_string() // <- now we need a copy
+    };
+    if !self.at(T!['(']) {
+        // plain identifier
+        ast::Expr::Ident(name)
+    } else {
+        //  function call
+        let mut args = Vec::new();
+        self.consume(T!['(']);
+        while !self.at(T![')']) {
+            let arg = self.parse_expression();
+            args.push(arg);
+            if self.at(T![,]) {
+                self.consume(T![,]);
+            }
+        }
+        self.consume(T![')']);
+        ast::Expr::FnCall { fn_name: name, args }
+    }
+}
+```
+If the token immediately after the identifier is an opening parenthesis, the expression becomes a function call.
+Otherwise, it stays an sole identifier.
+Remember that we filtered out any whitespace so the parenthesis will actually be the token right after the ident.
+
+For the calls we loop for as long as there are arguments (until the parentheses get closed) and parse the argument expressions _recursively_.
+This is what allows us to write `my_function(x + 4 * y, log(2*z))`, because the recursion will be able to parse any, full expression again.
+In between the arguments we expect commas and at the end we skip over the closing paren and make an `ast::Expr::FnCall` node for the input.
+
+Grouped expressions `(expr)` and prefix operators are fairly straightforward, because they also mostly call `parse_expression` recursively.
+What is interesting about grouped expressions is that they will not need an extra type of node.
+We only use the parentheses as boundaries of the expressions while parsing, but then the grouped expression _becomes_ the node for whatever is inside the parens:
+
+```rust
+T!['('] => {
+    // There is no AST node for grouped expressions.
+    // Parentheses just influence the tree structure.
+    self.consume(T!['(']);
+    let expr = self.parse_expression();
+    self.consume(T![')']);
+    expr
+}
+op @ T![+] | op @ T![-] | op @ T![!] => {
+    self.consume(op);
+    let expr = self.parse_expression();
+    ast::Expr::PrefixOp {
+        op,
+        expr: Box::new(expr),
+    }
+}
+```
+
+Full code of `parse_expression` so far:
+```rust
+pub fn parse_expression(&mut self) -> ast::Expr {
+    match self.peek() {
+        lit @ T![int] | lit @ T![float] | lit @ T![string] => {
+            let literal_text = {
+                // if `peek` is not `T![EOF]`, then there must be a next token
+                let literal_token = self.next().unwrap();
+                self.text(literal_token)
+            };
+            let lit = match lit {
+                T![int] => ast::Lit::Int(
+                    literal_text
+                        .parse()
+                        .expect(&format!(
+                            "invalid integer literal: `{}`", 
+                            literal_text)
+                        ),
+                ),
+                T![float] => ast::Lit::Float(
+                    literal_text
+                        .parse()
+                        .expect(&format!(
+                            "invalid floating point literal: `{}`", 
+                            literal_text)
+                        ),
+                ),
+                T![string] => ast::Lit::Str(
+                    literal_text[1..(literal_text.len() - 1)].to_string()
+                ),
+                _ => unreachable!(),
+            };
+            ast::Expr::Literal(lit)
+        }
+        T![ident] => {
+            let name = {
+                let ident_token = self.next().unwrap();
+                self.text(ident_token).to_string()
+            };
+            if !self.at(T!['(']) {
+                // plain identifier
+                ast::Expr::Ident(name)
+            } else {
+                //  function call
+                let mut args = Vec::new();
+                self.consume(T!['(']);
+                while !self.at(T![')']) {
+                    let arg = self.parse_expression();
+                    args.push(arg);
+                    if self.at(T![,]) {
+                        self.consume(T![,]);
+                    }
+                }
+                self.consume(T![')']);
+                ast::Expr::FnCall { fn_name: name, args }
+            }
+        }
+        T!['('] => {
+            // There is no AST node for grouped expressions.
+            // Parentheses just influence the tree structure.
+            self.consume(T!['(']);
+            let expr = self.parse_expression();
+            self.consume(T![')']);
+            expr
+        }
+        op @ T![+] | op @ T![-] | op @ T![!] => {
+            self.consume(op);
+            let expr = self.parse_expression();
+            ast::Expr::PrefixOp {
+                op,
+                expr: Box::new(expr),
+            }
+        }
+        kind => {
+            panic!("Unknown start of expression: `{}`", kind);
+        }
+    }
+}
+```
+
+What we have now is enough to write our first test for our new parser:
+```rust
+// In tests/it.rs
+
+#[test]
+fn parse_expression() {
+    fn parse(input: &str) -> ast::Expr {
+        let mut parser = Parser::new(input);
+        parser.parse_expression()
+    }
+
+    // Weird spaces are to test that whitespace gets filtered out
+    let expr = parse("42");
+    assert_eq!(expr, ast::Expr::Literal(ast::Lit::Int(42)));
+    let expr = parse("  2.7768");
+    assert_eq!(expr, ast::Expr::Literal(ast::Lit::Float(2.7768)));
+    let expr = parse(r#""I am a String!""#);
+    assert_eq!(expr, ast::Expr::Literal(
+        ast::Lit::Str("I am a String!".to_string())
+    ));
+    let expr = parse("foo");
+    assert_eq!(expr, ast::Expr::Ident("foo".to_string()));
+    let expr = parse("bar (  x, 2)");
+    assert_eq!(
+        expr,
+        ast::Expr::FnCall {
+            fn_name: "bar".to_string(),
+            args:    vec![
+                ast::Expr::Ident("x".to_string()), 
+                ast::Expr::Literal(ast::Lit::Int(2)),
+            ],
+        }
+    );
+    let expr = parse("!  is_visible");
+    assert_eq!(
+        expr,
+        ast::Expr::PrefixOp {
+            op:   T![!],
+            expr: Box::new(ast::Expr::Ident("is_visible".to_string())),
+        }
+    );
+    let expr = parse("(-13)");
+    assert_eq!(
+        expr,
+        ast::Expr::PrefixOp {
+            op:   T![-],
+            expr: Box::new(ast::Expr::Literal(ast::Lit::Int(13))),
+        }
+    );
+}
+```
+
+#### Binary Operators
+
+I'm gonna get a bit philosophical for this one, y'all ready?
+Ahem.
+_What really **is** a binary operator?_
+a token that _extends_ an expression
+
+
+## A Note on Error Handling
+As we have written it now, our parser will `panic` when it encounters something it doesn't understand.
+This is something all of us do from time to time, and there's no need to be ashamed about it.
+Learning something new is hard, and if you've made it through this entire post as a beginner, then you have pushed the boundaries of your comfort zone more than enough for a day, so give yourselves some well-earned rest and maybe have some fun playing around with what we have made.
+
+To wrap this back around to parsing; a "real" parser of course can't just crash on error.
+If the parser is for a compiler, for which invalid input programs are useless, it may stop parsing, but it shouldn't just die.
+Considering the user experience of using our parser is also important to consider.
+We are all spoiled by Rust's tooling, which we will not be able to "just" / quickly imitate.
+But some kind of user-facing errors are a must for any parser, and you should always strive to give the best feedback you can when something fails.
+
+For our parser, this post is already very long and I don't want to shove an even more overwhelming amount of information down you people's throats.
+If this is received well, adapting our parser to handle errors could be a nice topic for a follow-up article.
+Until then, try not to panic when you're hitting a wall on your language development journey.
+If you do get stuck somewhere, remember that there is always someone around in the community that can and will be happy to help you.
+And instead of banging your head against that wall, maybe go outside, look at some real trees, and ponder why they are upside down.
+
 
 ---
 [^stmt-expr]: In Rust, this is somewhat confusing, because most expressions can also be statements. For example, you can `break` a value from a `loop`. <a href="#fn-stmt-expr" class="footnote-backref" role="doc-backlink">↩︎</a>
