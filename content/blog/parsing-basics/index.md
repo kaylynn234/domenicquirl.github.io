@@ -1118,7 +1118,8 @@ fn struct_def() {
         }
     "#;
     let input = unindent(input);
-    let mut lexer = Lexer::new(input.as_str());
+    let input = input.as_str();
+    let mut lexer = Lexer::new(input);
     let tokens: Vec<_> = lexer.tokenize().into_iter().filter(|t| t.kind != T![ws]).collect();
     assert_tokens!(tokens, [
         // struct definition/type
@@ -1132,12 +1133,30 @@ fn struct_def() {
     assert_eq!(bar.span, (20..23).into()); // unindented span
 }
 ```
-One lexer, done.<br><br>
 Note that the comment before the `fn test` is correctly recognized as a comment, while in the assignment to `x` there is a single `/` for division.
 This is because the comment is longer than a single slash, so it wins against the single character rule.
 The same happens for the floating point number in the same assignment.
 Our keywords are also recognized correctly.
 They do match as identifiers as well, but their rules are declared earlier than the identifier rule, so our lexer gives them precedence.
+
+#### Some Source Text
+
+We'll extend that last text with a few checks for identifiers to illustrate how to get back at the input string from a token:
+```rust
+#[test]
+fn struct_def() {
+    // `input`, `lexer` and `tokens`, unchanged
+
+    let bar = tokens[6];
+    assert_eq!(bar.span, (20..23).into()); 
+    assert_eq!(bar.text(input), "bar"); // <- NEW!
+
+    let foo = tokens[1];
+    assert_eq!(foo.text(input), "Foo"); // <- NEW!
+}
+```
+
+One lexer, done.<br><br>
 
 ### The Parser
 
