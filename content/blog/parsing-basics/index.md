@@ -1581,8 +1581,405 @@ fn parse_expression() {
 I'm gonna get a bit philosophical for this one, y'all ready?
 Ahem.
 _What really **is** a binary operator?_
-a token that _extends_ an expression
+Sure, it's an operator that goes in between to operands.
+But, from a parsing perspective, it's a token that _extends_ an expression.
 
+Imagine the input `-x + 3 * y ^ 2`.
+With what we have now, we get as far as parsing `-x` as a unary operator on an identifier, because that's the biggest unit you can get without infix operators.
+Seeing that the next token is a `+` tells us that the expression we are parsing is actually longer than that, and that after the `+` there should be another expression; the right-hand side of the addition.
+
+In our first attempt at parsing binary operators, we will try to follow this view by adding an "operator loop" to `parse_expression`.
+The entire `match` we have built so far becomes a potential left-hand side `lhs` of a binary operator, and after we parse it we check if the following token is an operator.
+If so, we continue parsing its right-hand side and build a corresponding `ast::Expr::InfixOp` node:
+```rust
+// In parser/expressions.rs
+
+pub fn parse_expression(&mut self) -> ast::Expr {
+    let mut lhs = match self.peek() {
+        // unchanged
+    };
+    loop {
+        let op = match self.peek() {
+            op @ T![+]
+            | op @ T![-]
+            | op @ T![*]
+            | op @ T![/]
+            | op @ T![^]
+            | op @ T![==]
+            | op @ T![!=]
+            | op @ T![&&]
+            | op @ T![||]
+            | op @ T![<]
+            | op @ T![<=]
+            | op @ T![>]
+            | op @ T![>=]
+            | op @ T![!] => op,
+            T![EOF] => break,
+            T![')'] | T!['}'] | T![,] | T![;] => break,
+            kind => panic!("Unknown operator: `{}`", kind),
+        };
+
+        self.consume(op);
+        let rhs = self.parse_expression();
+        lhs = ast::Expr::InfixOp {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        };
+    }
+
+    lhs
+}
+```
+If we add a small test, we see that we can now parse longer, combined expressions.
+To tests, we'll implement `Display` for our AST such that expressions are always put in parentheses:
+```rust
+// In parser/ast.rs
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Expr::Literal(lit) => write!(f, "{}", lit),
+            Expr::Ident(name) => write!(f, "{}", name),
+            Expr::FnCall { fn_name, args } => {
+                write!(f, "{}(", fn_name)?;
+                for arg in args {
+                    write!(f, "{},", arg)?;
+                }
+                write!(f, ")")
+            }
+            Expr::PrefixOp { op, expr } => 
+                write!(f, "({} {})", op, expr),
+            Expr::InfixOp { op, lhs, rhs } => 
+                write!(f, "({} {} {})", lhs, op, rhs),
+            Expr::PostfixOp { op, expr } => 
+                write!(f, "({} {})", expr, op),
+        }
+    }
+}
+
+impl fmt::Display for Lit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Lit::Int(i) => write!(f, "{}", i),
+            Lit::Float(fl) => write!(f, "{}", fl),
+            Lit::Str(s) => write!(f, r#""{}""#, s)
+        }
+    }
+}
+```
+
+This test now passes:
+```rust
+// In tests/it.rs
+
+#[test]
+fn parse_binary_expressions() {
+    fn parse(input: &str) -> ast::Expr {
+        let mut parser = Parser::new(input);
+        parser.parse_expression()
+    }
+
+    let expr = parse("4 + 2 * 3");
+    assert_eq!(expr.to_string(), "(4 + (2 * 3))");
+}
+```
+However, if we add some more expressions, we'll see that not all of them get parsed as we would expect to following our intuitions about maths:
+```rust
+#[test]
+fn parse_binary_expressions() {
+    fn parse(input: &str) -> ast::Expr {
+        let mut parser = Parser::new(input);
+        parser.parse_expression()
+    }
+
+    let expr = parse("4 + 2 * 3");
+    assert_eq!(expr.to_string(), "(4 + (2 * 3))"); // passes
+
+    let expr = parse("4 * 2 + 3");
+    assert_eq!(expr.to_string(), "((4 * 2) + 3)"); // fails
+
+    let expr = parse("4 - 2 - 3");
+    assert_eq!(expr.to_string(), "((4 - 2) - 3)"); // fails
+
+    let expr = parse("4 ^ 2 ^ 3");
+    assert_eq!(expr.to_string(), "(4 ^ (2 ^ 3))"); // passes
+}
+```
+Currently, we're extending the expression recursively unconditionally on seeing any operator.
+Because the recursion happens after the operator, to parse the right-hand side, all our binary expressions are right-associative and ignore operator precedence rules like `*` being evaluated before `+`.
+That said, this isn't all that surprising, giving that `parse_expression` currently has no way of knowing an operator's precedence.
+Let's fix that:
+```rust
+// In parser/expressions.rs
+
+trait Operator {
+    /// Prefix operators bind their operand to the right.
+    fn prefix_binding_power(&self) -> ((), u8);
+
+    /// Infix operators bind two operands, lhs and rhs.
+    fn infix_binding_power(&self) -> Option<(u8, u8)>;
+
+    /// Postfix operators bind their operand to the left.
+    fn postfix_binding_power(&self) -> Option<(u8, ())>;
+}
+
+impl Operator for TokenKind {
+    fn prefix_binding_power(&self) -> ((), u8) {
+        match self {
+            T![+] | T![-] | T![!] => ((), 51),
+            // Prefixes are the only operators we have already seen
+            // when we call this, so we know the token must be
+            // one of the above
+            _ => unreachable!("Not a prefix operator: {:?}", self),
+        }
+    }
+
+    fn infix_binding_power(&self) -> Option<(u8, u8)> {
+        let result = match self {
+            T![||] => (1, 2),
+            T![&&] => (3, 4),
+            T![==] | T![!=] => (5, 6),
+            T![<] | T![>] | T![<=] | T![>=] => (7, 8),
+            T![+] | T![-] => (9, 10),
+            T![*] | T![/] => (11, 12),
+            T![^] => (22, 21), // <- This binds stronger to the left!
+            _ => return None,
+        };
+        Some(result)
+    }
+
+    fn postfix_binding_power(&self) -> Option<(u8, ())> {
+        let result = match self {
+            T![!] => (101, ()),
+            _ => return None,
+        };
+        Some(result)
+    }
+}
+```
+For all operators, we define how tightly they bind to the left and to the right.
+If the operator is a pre- or postfix operator, one of the directions is `()`.
+The general idea is that the higher the binding power of an operator in some direction, the more it will try to take the operand on that side for itself and take it a way from other operators.
+For example, in
+```rust
+    4  *   2   +  3
+//   11 12    9 10
+```
+the binding power of `12` that `*` has to the right wins against the lower `9` that `+` has to the left, so the `2` gets associated with `*` and we get `(4 * 2) + 3`.
+Most of the operators bind more tightly to the right than to the left.
+This way we get
+```rust
+    4  -   2   -  3
+//    9 10    9 10
+```
+the right way round as `(4 - 2) - 3` as the `10` that `-` has to the right wins against the `9` it has to the left.
+For right-associative operators like `^`, we swap the higher binding power to the left:
+```rust
+    4  ^   2   ^  3
+//   22 21   22 21
+```
+is grouped as `4 ^ (2 ^ 3)` as `22` wins against `21`.
+
+How can we implement this into our `parse_expression`?
+We'll need to know the right-sided binding power of the operator that triggered a recursion which parses a new right-hand side.
+When we enter the operator loop, we check not only if the next token is an operator, but also its left-sided binding power.
+Only if this binding power is at least as high as the current right-sided one do we recurse again, which associates the current expression with the _new, following_ operator.
+Otherwise we stop and return, so the operator with the higher right-sided binding power gets the expression.
+
+This is hard to wrap your head around the first time. Once you get it, it's great and you will never want to do anything else again to handle expression, but it needs to click first. 
+[Simple but Powerful Pratt Parsing](https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html) by `matklad`, the man behind `rust-analyzer`, is a very good article on the topic if you'd like to get explained this again, in a different way.
+In code, it looks like this:
+```rust
+// In parser/expressions.rs
+
+pub fn parse_expression(&mut self, binding_power: u8) -> ast::Expr {
+    let mut lhs = match self.peek() {
+        lit @ T![int] | lit @ T![float] | lit @ T![string] => {
+            // unchanged
+        }
+        T![ident] => {
+            let name = {
+                let ident_token = self.next().unwrap();
+                self.text(ident_token).to_string()
+            };
+            if !self.at(T!['(']) {
+                // plain identifier
+                ast::Expr::Ident(name)
+            } else {
+                //  function call
+                let mut args = Vec::new();
+                self.consume(T!['(']);
+                while !self.at(T![')']) {
+                    let arg = self.parse_expression(0); // <- NEW!
+                    args.push(arg);
+                    if self.at(T![,]) {
+                        self.consume(T![,]);
+                    }
+                }
+                self.consume(T![')']);
+                ast::Expr::FnCall { fn_name: name, args }
+            }
+        }
+        T!['('] => {
+            // There is no AST node for grouped expressions.
+            // Parentheses just influence the tree structure.
+            self.consume(T!['(']);
+            let expr = self.parse_expression(0); // <- NEW!
+            self.consume(T![')']);
+            expr
+        }
+        op @ T![+] | op @ T![-] | op @ T![!] => {
+            self.consume(op);
+            let ((), right_binding_power) = op.prefix_binding_power(); 
+            let expr = self.parse_expression(right_binding_power); // <- NEW!
+            ast::Expr::PrefixOp {
+                op,
+                expr: Box::new(expr),
+            }
+        }
+        kind => {
+            panic!("Unknown start of expression: `{}`", kind);
+        }
+    };
+    loop {
+        let op = // unchanged;
+
+        if let Some((left_binding_power, right_binding_power)) = 
+            op.infix_binding_power() { // <- NEW!
+
+            if left_binding_power < binding_power {
+                // previous operator has higher binding power then new one
+                // --> end of expression
+                break; 
+            }
+
+            self.consume(op);
+            let rhs = self.parse_expression(right_binding_power);
+            lhs = ast::Expr::InfixOp {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+            // parsed an operator --> go round the loop again
+            continue; 
+        }
+        break; // Not an operator --> end of expression
+    }
+
+    lhs
+}
+```
+Recursive calls for both prefix and infix operators get passed the right-sided binding power of the current operator.
+The important stopping point is the `if left_binding_power < binding_power { break; }` inside the operator loop.
+If `op`'s left-sided binding power does not at least match the required binding power of the current invocation, it does not get parsed in the loop.
+It will instead get parsed some number of returns up the recursion stack, by an operator loop with sufficiently high binding power.
+Function call arguments and grouped expressions in parentheses reset the required binding power to `0`, since they take precedence before any chain of operators.
+
+For the interface of our parser, we add a small wrapper that will also call `parse_expression` with an initial binding power of `0`:
+```rust
+pub fn expression(&mut self) -> ast::Expr {
+    self.parse_expression(0)
+}
+```
+We need to swap that in in our expression parsing tests:
+```rust
+// In tests/it.rs, expression tests
+
+fn parse(input: &str) -> ast::Expr {
+    let mut parser = Parser::new(input);
+    parser.expression()
+}
+```
+The test that previously failed should now pass.
+We'll add a few more complex expressions and test that they are also parsed correctly:
+```rust
+// In tests/it.rs
+
+#[test]
+fn parse_binary_expressions() {
+    // ...unchanged
+
+    let expr = parse(
+        r#"45.7 + 3 + 5 * 4^8^9 / 6 > 4 && test - 7 / 4 == "Hallo""#
+    );
+    assert_eq!(
+        expr.to_string(),
+        r#"((((45.7 + 3) + ((5 * (4 ^ (8 ^ 9))) / 6)) > 4) && ((test - (7 / 4)) == "Hallo"))"#
+    );
+
+    let expr = parse("2.0 / ((3.0 + 4.0) * (5.0 - 6.0)) * 7.0");
+    assert_eq!(expr.to_string(), "((2 / ((3 + 4) * (5 - 6))) * 7)");
+
+    let expr = parse("min ( test + 4 , sin(2*PI ))");
+    assert_eq!(expr.to_string(), "min((test + 4),sin((2 * PI),),)");
+}
+```
+Postfix operators are now an easy addition:
+```rust
+// In parser/expresions.rs
+
+pub fn parse_expression(&mut self, binding_power: u8) -> ast::Expr {
+    let mut lhs = match self.peek() {
+        // unchanged
+    };
+    loop {
+        let op = // unchanged;
+
+        // NEW!
+        if let Some((left_binding_power, ())) = op.postfix_binding_power() { 
+            if left_binding_power < binding_power {
+                // previous operator has higher binding power then new one 
+                // --> end of expression
+                break;
+            }
+
+            self.consume(op);
+            // no recursive call here, because we have already
+            // parsed our operand `lhs`
+            lhs = ast::Expr::PostfixOp {
+                op,
+                expr: Box::new(lhs),
+            };
+            // parsed an operator --> go round the loop again
+            continue;
+        }
+
+        if let Some((left_binding_power, right_binding_power)) = 
+            op.infix_binding_power() {
+            // unchanged
+        }
+
+        break; // Not an operator --> end of expression
+    }
+
+    lhs
+}
+```
+And to check it works:
+```rust
+// In tests/it.rs
+
+#[test]
+fn parse_postfix_op() {
+    fn parse(input: &str) -> ast::Expr {
+        let mut parser = Parser::new(input);
+        parser.expression()
+    }
+
+    let expr = parse("4 + -2! * 3");
+    assert_eq!(expr.to_string(), "(4 + ((- (2 !)) * 3))");
+}
+```
+
+This will be the end of expressions for us.
+If you want, try adding additional operators on your own.
+Some language constructs that one might not necessarily think of as operators fit very cleanly into our framework.
+For example, try adding `.` as an operator to model field accesses like `foo.bar`.
+For a greater challenge, array indexing can be handled as a combination of postfix operator `[` and grouped expressions.
+There's all kinds of expressions left for you to do, but we now have to move on to...
+
+#### Statements
 
 ## A Note on Error Handling
 As we have written it now, our parser will `panic` when it encounters something it doesn't understand.
