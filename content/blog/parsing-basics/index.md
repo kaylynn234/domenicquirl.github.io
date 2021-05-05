@@ -33,7 +33,7 @@ While I'm on the topic of other resources, [the `rust-langdev` repository](https
 ---
 ## Blog Repository
 
-The parser built in this article is publicly available at [https://github.com/<wbr>domenicquirl/<wbr>blog/<wbr>parsing-<wbr>basics](https://github.com/domenicquirl/blog/parsing-basics).
+The parser built in this article is publicly available at [https://github.com/<wbr>domenicquirl/<wbr>blog/<wbr>tree/<wbr>master/<wbr>parsing-<wbr>basics](https://github.com/domenicquirl/blog/tree/master/parsing-basics).
 The repository contains the final result of our parser implementation, including tests and benches.
 
 ---
