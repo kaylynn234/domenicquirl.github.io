@@ -273,7 +273,7 @@ macro_rules! T {
 }
 ```
 This is a long list, but from now on we can for example refer to the "less or equal comparison" token kind as `T![<=]`.
-Not only does that save a lot of typing, in my opinion it is also a lot to read.
+Not only does that save a lot of typing, in my opinion it is also a lot more fluent to read.
 The first use of our new macro will be implementing a nice `Display` representation for `TokenKind`:
 ```rust
 impl fmt::Display for TokenKind {
