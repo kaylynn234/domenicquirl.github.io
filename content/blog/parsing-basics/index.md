@@ -1,6 +1,6 @@
 +++
 title = "Where to Start Hand-Writing a Parser (in Rust)"
-date = 2021-04-26
+date = 2021-05-05
 +++
 
 I'm in [the Rust community Discord server](https://www.rust-lang.org/community).
