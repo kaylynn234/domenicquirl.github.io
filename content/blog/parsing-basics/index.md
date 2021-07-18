@@ -3,7 +3,7 @@ title = "Where to Start Hand-Writing a Parser (in Rust)"
 date = 2021-05-05
 +++
 
-I'm in [the Rust community Discord server](https://www.rust-lang.org/community).
+I'm in [the Rust community Discord server](https://discord.gg/rust-lang-community).
 Particularly, I hang around in their language development channel (regularly called `#lang-dev`, but its name is ever changing).
 The folks in the server come with varying experience in Rust, and `#lang-dev` is frequented by Rustaceans of vastly different skill levels and knowledge backgrounds when it comes to actually working on a programming language.
 In my experience, the Rust community is incredibly kind and usually glad to help out with questions.
