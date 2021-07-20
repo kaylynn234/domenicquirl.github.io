@@ -45,8 +45,9 @@ $largescreen-width: 1050px;
             background-color: #e7e7e7;
             border: none;
         }
-        pre {
+        pre { 
             padding: 1rem;
+            overflow: auto;
             span {
                 white-space: pre-wrap;
             }
