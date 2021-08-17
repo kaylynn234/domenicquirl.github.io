@@ -1854,7 +1854,7 @@ pub fn parse_expression(&mut self, binding_power: u8) -> ast::Expr {
             op.infix_binding_power() { // <- NEW!
 
             if left_binding_power < binding_power {
-                // previous operator has higher binding power then new one
+                // previous operator has higher binding power than new one
                 // --> end of expression
                 break; 
             }
@@ -1934,7 +1934,7 @@ pub fn parse_expression(&mut self, binding_power: u8) -> ast::Expr {
         // NEW!
         if let Some((left_binding_power, ())) = op.postfix_binding_power() { 
             if left_binding_power < binding_power {
-                // previous operator has higher binding power then new one 
+                // previous operator has higher binding power than new one 
                 // --> end of expression
                 break;
             }
@@ -2428,11 +2428,11 @@ T![fn] => {
 
     let ident = self
         .next()
-        .expect("Tried to parse struct member, but there were no more tokens");
+        .expect("Tried to parse function name, but there were no more tokens");
     assert_eq!(
         ident.kind,
         T![ident],
-        "Expected identifier as struct member, but found `{}`",
+        "Expected identifier as function name, but found `{}`",
         ident.kind
     );
     let name = self.text(ident).to_string();
@@ -2441,12 +2441,12 @@ T![fn] => {
     while !self.at(T![')']) {
         let parameter_ident = self
             .next()
-            .expect("Tried to parse struct member, 
+            .expect("Tried to parse function parameter, 
                 but there were no more tokens");
         assert_eq!(
             parameter_ident.kind,
             T![ident],
-            "Expected identifier as struct member, but found `{}`",
+            "Expected identifier as function parameter, but found `{}`",
             parameter_ident.kind
         );
         let parameter_name = self.text(parameter_ident).to_string();
