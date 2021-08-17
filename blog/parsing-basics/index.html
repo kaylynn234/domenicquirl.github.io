@@ -1,0 +1,3053 @@
+<!DOCTYPE html>
+<html lang="en-UK">
+
+<head>
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta http-equiv="content-type" content="text/html; charset=utf-8">
+    <meta name="Description" content="Blogged Thoughts about Rust">
+
+    <!-- Enable responsiveness on mobile devices-->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=2">
+
+    <title>Quirl</title>
+    <link rel="shortcut icon" href="https:&#x2F;&#x2F;domenicquirl.github.io&#x2F;favicon.ico" />
+
+    
+<!-- CSS -->
+<link rel="stylesheet" href="../../font-opensans.css" />
+<link rel="stylesheet" href="../../font-fira.css" />
+<link rel="stylesheet" href="../../main.css" />
+
+<!-- Syntax highlighting -->
+<script type="text/javascript" src="../../prism.js"></script>
+
+</head>
+
+<body>
+    <div class="page">
+        <div class="page__content">
+            <div class="book-content">
+                
+<h1 class="title" style="padding-top: 30px;">
+    Where to Start Hand-Writing a Parser (in Rust)
+</h1>
+<p class="subtitle"><strong>2021-05-05</strong></p>
+<p>I'm in <a href="https://discord.gg/rust-lang-community">the Rust community Discord server</a>.
+Particularly, I hang around in their language development channel (regularly called <code>#lang-dev</code>, but its name is ever changing).
+The folks in the server come with varying experience in Rust, and <code>#lang-dev</code> is frequented by Rustaceans of vastly different skill levels and knowledge backgrounds when it comes to actually working on a programming language.
+In my experience, the Rust community is incredibly kind and usually glad to help out with questions.
+Some questions however, especially beginner ones, keep coming up again and again.</p>
+<p>Regarding parsing, there are a number of great resources already.
+To mention a few, together with some guesses on why they might leave some of <code>#lang-dev</code>'s visitors' questions open (if you <em>are</em> a beginner and some of these words don't mean anything to you yet, don't worry. We'll get there.):</p>
+<ul>
+<li>
+<p><a href="https://craftinginterpreters.com/">Crafting Interpreters</a> is an <em>absolutely fantastic</em> read. Code examples are in Java and C however (also, the C compiler they develop is of very explicitly single-pass, which often makes it difficult for people to use it as guidance for their languages if the language design does not fit that model well. But that's less related to parsing). </p>
+</li>
+<li>
+<p><a href="https://adriann.github.io/rust_parser.html">Writing a Simple Parser in Rust</a> is very beginner-friendly, as it describes the author's own experience coming up with their parser. The parsing result is a homogenous syntax tree, which I personally like a lot, but, based on Rust Discord conversations, a strongly typed AST seems to be easier to conceptualize for many beginners because it gives you concrete <em>things</em> from your language to talk about (like a <code>Function</code> or a <code>Variable</code>). More generally, the post is focused on parsing arithmetic expressions. </p>
+<p>There is more to most languages than those, though, and dealing with precedence and associativity is often the source of a lot of confusion. The lexer implementation also vastly simplifies in this context, and is done by matching individual characters. That is by all means sufficient for the use case, but does not help beginners with lexing identifiers, escaped string literals, or even just floating point numbers (optionally with scientific notation), even less with handling conflicts between different classes of tokens (such as keywords which look like identifiers).</p>
+</li>
+<li>
+<p><a href="https://arzg.github.io/lang/">Make a Language</a> is very detailed, but skips from lexer-less string-based parsing directly to using the <a href="https://crates.io/crates/logos"><code>logos</code></a> crate.</p>
+</li>
+</ul>
+<p>While I'm on the topic of other resources, <a href="https://github.com/Kixiron/rust-langdev">the <code>rust-langdev</code> repository</a> is a collection of language development-related crates organized by category, also featuring a &quot;Resources&quot; section with further links on a bunch of topics. Go check it out!</p>
+<h2 id="this-post-is"><a class="zola-anchor" href="#this-post-is" aria-label="Anchor link for: this-post-is">🔗</a>This Post is</h2>
+<ul>
+<li>An introduction to programming language parsing in which we hand-write a parser and run it on some real input.</li>
+<li>A starting point, leaving lots of room for own experiments and further reading.</li>
+<li>Intended as a collection of partial answers I have given in the Discord over time, to have a more comprehensive example and explanation to refer people to.</li>
+<li>Accompanied by a public repository containing the full implementation.</li>
+</ul>
+<h2 id="this-post-is-not"><a class="zola-anchor" href="#this-post-is-not" aria-label="Anchor link for: this-post-is-not">🔗</a>This Post is not</h2>
+<ul>
+<li>Conclusive. Several problems we are tackling here can be solved in multiple ways and I present only one place to start. </li>
+<li>A tutorial on writing production parsers, or an in-depth tutorial on any of the areas it covers really.</li>
+<li>About parser generators. We will do all of the parsing by hand.</li>
+</ul>
+<hr />
+<h2 id="blog-repository"><a class="zola-anchor" href="#blog-repository" aria-label="Anchor link for: blog-repository">🔗</a>Blog Repository</h2>
+<p>The parser built in this article is publicly available at <a href="https://github.com/domenicquirl/blog/tree/master/parsing-basics">https://github.com/<wbr>domenicquirl/<wbr>blog/<wbr>tree/<wbr>master/<wbr>parsing-<wbr>basics</a>.
+The repository contains the final result of our parser implementation, including tests and benches.</p>
+<hr />
+<h2 id="a-high-level-view"><a class="zola-anchor" href="#a-high-level-view" aria-label="Anchor link for: a-high-level-view">🔗</a>A High-Level View</h2>
+<p>By &quot;parsing&quot;, we mean the process of transforming some input text, for example a source file of code in your language, into a <em>syntax tree</em>.</p>
+<p><strong>Why transform the text?</strong> Because working with individual characters gets really tedious very quickly, and also introducing additional <em>structure</em> to, e.g., the input to a compiler for your language, is very useful to said compiler (or language server, or whatever you want to build) because it can operate on a <em>higher level of abstraction</em>.</p>
+<p><strong>Why a tree?</strong> Programs in most languages are already organized <em>hierarchically</em>.
+Think about Rust: You have <em>crates</em> (libraries or binaries), which can house multiple <em>modules</em>.
+Each module can define an arbitrary number of <em>items</em> such as <em>structs</em>, <em>traits</em>, <em>functions</em> or <em>constants</em>.
+A function is a sequence of multiple <em>statements</em> like <em>variable assignments</em>, <em>loops</em>, <em>conditionals</em> (<code>if</code>), etc<sup class="footnote-reference"><a href="#stmt-expr">1</a></sup><span id="fn-stmt-expr"></span>.</p>
+<p>Statements are subdivided further into their components, until at some point we reach some kind of &quot;basic building blocks&quot; of our language and can go no further.
+For example, a variable assignment in Rust consists of the keyword <code>let</code>, a variable name, an equals sign <code>=</code>, an <em>expression</em> that represents the new value of the variable, and a closing semicolon <code>;</code>.
+The expression could be a <em>function call</em>, a combined expression like an addition of two numbers, or just a <em>literal</em> (a literal is when you write an explicit value of some data type, like <code>3</code>, <code>&quot;Hello World!&quot;</code> or <code>Foo { bar: 2 }</code>).</p>
+<p>Inside of a struct are its fields, but there is even more hierarchy that can be hidden in a struct definition.
+Consider a generic <code>struct Foo&lt;T, U&gt;</code>.
+The <em>type definition</em> of this struct includes the struct's name (<code>Foo</code>), as well as a list of generic parameters.
+If you place some restrictions on <code>T</code> or <code>U</code> with a <code>where</code> bound, that bound becomes part of the struct definition too!</p>
+<p>Trees are exactly the structure to represent how a program in your language is built up from its basic blocks layer by layer.
+You need somewhere to start, like a crate in Rust, but we will just start out with a single file which can contain multiple functions.
+This starting point becomes the <em>root</em> of the syntax tree.
+When parsing a program, it's all about piecing together more and more parts of the tree, branching out every time a part of the program is made up of multiple smaller parts (so, always).
+Below is an illustration of a syntax tree for a file that contains a function with a variable assignment:</p>
+<div class="image-include">
+    <img src="https:&#x2F;&#x2F;domenicquirl.github.io&#x2F;processed_images&#x2F;90d44530bf694d5b00.png" class="horizontal" />
+</div>
+<h3 id="excuse-me-there-s-a-lexer-in-your-parser"><a class="zola-anchor" href="#excuse-me-there-s-a-lexer-in-your-parser" aria-label="Anchor link for: excuse-me-there-s-a-lexer-in-your-parser">🔗</a>&quot;Excuse me, there's a Lexer in your Parser&quot;</h3>
+<p>The first point of confusion that commonly arises is that what is colloquially referred to as &quot;parsing&quot; quite often includes not one, but <strong>two</strong> components: a <strong>lexer</strong> and a <strong>parser</strong>.</p>
+<div class="image-include">
+    <img src="https:&#x2F;&#x2F;domenicquirl.github.io&#x2F;processed_images&#x2F;2d2e9414b308798000.png" class="vertical" />
+</div>
+<p>A lexer looks at the input string character by character and tries to group those characters together into something that at least has a meaning in your language.
+We'll call such a group of characters a <em>token</em>.
+Sometimes, a token will just be a single character.
+A semicolon or an equals sign already mean something to you when you program, while the individual letters <code>&quot;l&quot;</code>, <code>&quot;e&quot;</code> and <code>&quot;t&quot;</code> probably don't in most contexts.
+The lexer will recognize that sequence of characters as the <code>let</code> keyword and will put them in a group together as a single token.
+Similarly, the lexer will produce a single &quot;floating point number&quot; token for the input <code>27.423e-12</code>.</p>
+<p>The parser's job is then to take the meaningful tokens kindly created by the lexer and figure out their hierarchical structure to turn them into a syntax tree.
+I've described most of the general idea above already, so let's finally <em>make</em> one!</p>
+<p><strong>Edit:</strong>
+It was pointed out to me that I should probably at least mention that you don't <em>have to</em> explicitly make a separate lexer and parser.
+Lexing and parsing actions or phases are conceptually part of the majority of parsers, but there are systems that don't split them as rigorously or even actively try to integrate them as closely as possible.
+<a href="https://en.m.wikipedia.org/wiki/Scannerless_parsing">Scannerless parsers</a> are a broad category of examples of this, which also contains several parser generators.
+If you do this, this makes it much easier for example to parse <em>multiple</em> languages combined.
+We are not doing that in this post, and since this is intended to be an introduction to lexing and parsing I'll keep the two separate in our implementation.</p>
+<h2 id="implementing-our-lexer-and-parser"><a class="zola-anchor" href="#implementing-our-lexer-and-parser" aria-label="Anchor link for: implementing-our-lexer-and-parser">🔗</a>Implementing our Lexer and Parser</h2>
+<p>We'll set up a new crate for our parsing experiments:<br>
+<code>&gt; cargo new --lib parsing-basics</code><br><br>
+Since we need tokens for the parser, we start with the lexer and make a <code>lexer</code> module, which in turn has a <code>token</code> module.
+In there, we make an <code>enum</code> of the kinds of tokens we will have:</p>
+<pre><code class="language-rust" data-lang="rust">// In token.rs
+
+#[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
+pub enum TokenKind {
+    // Single characters
+    Plus,
+    Minus,
+    Times,
+    Slash,
+    Pow,
+    Eq,
+    Dot,
+    Comma,
+    Underscore,
+    Bang,
+    Ampersand,
+    Bar,
+    Colon,
+    SemiColon,
+    // Brackets
+    LAngle,
+    RAngle,
+    LSquare,
+    RSquare,
+    LBrace,
+    RBrace,
+    LParen,
+    RParen,
+    // Multiple characters
+    String,
+    Comment,
+    Int,
+    Float,
+    Identifier,
+    KeywordLet,
+    KeywordFn,
+    KeywordStruct,
+    KeywordIf,
+    KeywordElse,
+    // Operators
+    And,
+    Or,
+    Eqq,
+    Neq,
+    Geq,
+    Leq,
+    // Misc,
+    Error,
+    Whitespace,
+    Eof,
+}
+</code></pre>
+<p>You can see we have a lot of single-character tokens in there (including left and right brackets of all types), and then the groupings of strings and comments, numbers, and identifiers and keywords, as well as kinds to group things like <code>&amp;&amp;</code> or <code>!=</code> together.
+We also have the <code>Error</code> kind in case we see a character we don't understand, and the <code>Eof</code> kind, which stands for &quot;end of file&quot; and will be the last token produced by the lexer.
+Next, we will do something that will come in handy a lot during our implementation: we will define a macro for referencing token kinds:</p>
+<pre><code class="language-rust" data-lang="rust">#[macro_export]
+macro_rules! T {
+    [+] =&gt; {
+        $crate::lexer::TokenKind::Plus
+    };
+    [-] =&gt; {
+        $crate::lexer::TokenKind::Minus
+    };
+    [*] =&gt; {
+        $crate::lexer::TokenKind::Times
+    };
+    [/] =&gt; {
+        $crate::lexer::TokenKind::Slash
+    };
+    [^] =&gt; {
+        $crate::lexer::TokenKind::Pow
+    };
+    [=] =&gt; {
+        $crate::lexer::TokenKind::Eq
+    };
+    [.] =&gt; {
+        $crate::lexer::TokenKind::Dot
+    };
+    [,] =&gt; {
+        $crate::lexer::TokenKind::Comma
+    };
+    [_] =&gt; {
+        $crate::lexer::TokenKind::Underscore
+    };
+    [!] =&gt; {
+        $crate::lexer::TokenKind::Bang
+    };
+    [&amp;] =&gt; {
+        $crate::lexer::TokenKind::Ampersand
+    };
+    [|] =&gt; {
+        $crate::lexer::TokenKind::Bar
+    };
+    [:] =&gt; {
+        $crate::lexer::TokenKind::Colon
+    };
+    [;] =&gt; {
+        $crate::lexer::TokenKind::SemiColon
+    };
+    [&lt;] =&gt; {
+        $crate::lexer::TokenKind::LAngle
+    };
+    [&gt;] =&gt; {
+        $crate::lexer::TokenKind::RAngle
+    };
+    ['['] =&gt; {
+        $crate::lexer::TokenKind::LSquare
+    };
+    [']'] =&gt; {
+        $crate::lexer::TokenKind::RSquare
+    };
+    ['{'] =&gt; {
+        $crate::lexer::TokenKind::LBrace
+    };
+    ['}'] =&gt; {
+        $crate::lexer::TokenKind::RBrace
+    };
+    ['('] =&gt; {
+        $crate::lexer::TokenKind::LParen
+    };
+    [')'] =&gt; {
+        $crate::lexer::TokenKind::RParen
+    };
+    [string] =&gt; {
+        $crate::lexer::TokenKind::String
+    };
+    [comment] =&gt; {
+        $crate::lexer::TokenKind::Comment
+    };
+    [int] =&gt; {
+        $crate::lexer::TokenKind::Int
+    };
+    [float] =&gt; {
+        $crate::lexer::TokenKind::Float
+    };
+    [ident] =&gt; {
+        $crate::lexer::TokenKind::Identifier
+    };
+    [let] =&gt; {
+        $crate::lexer::TokenKind::KeywordLet
+    };
+    [fn] =&gt; {
+        $crate::lexer::TokenKind::KeywordFn
+    };
+    [struct] =&gt; {
+        $crate::lexer::TokenKind::KeywordStruct
+    };
+    [if] =&gt; {
+        $crate::lexer::TokenKind::KeywordIf
+    };
+    [else] =&gt; {
+        $crate::lexer::TokenKind::KeywordElse
+    };
+    [&amp;&amp;] =&gt; {
+        $crate::lexer::TokenKind::And
+    };
+    [||] =&gt; {
+        $crate::lexer::TokenKind::Or
+    };
+    [==] =&gt; {
+        $crate::lexer::TokenKind::Eqq
+    };
+    [!=] =&gt; {
+        $crate::lexer::TokenKind::Neq
+    };
+    [&gt;=] =&gt; {
+        $crate::lexer::TokenKind::Geq
+    };
+    [&lt;=] =&gt; {
+        $crate::lexer::TokenKind::Leq
+    };
+    [error] =&gt; {
+        $crate::lexer::TokenKind::Error
+    };
+    [ws] =&gt; {
+        $crate::lexer::TokenKind::Whitespace
+    };
+    [EOF] =&gt; {
+        $crate::lexer::TokenKind::Eof
+    };
+}
+</code></pre>
+<p>This is a long list, but from now on we can for example refer to the &quot;less or equal comparison&quot; token kind as <code>T![&lt;=]</code>.
+Not only does that save a lot of typing, in my opinion it is also a lot more fluent to read.
+The first use of our new macro will be implementing a nice <code>Display</code> representation for <code>TokenKind</code>:</p>
+<pre><code class="language-rust" data-lang="rust">impl fmt::Display for TokenKind {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        write!(
+            f,
+            &quot;{}&quot;,
+            match self {
+                // Single characters
+                T![+] =&gt; &quot;+&quot;,
+                T![-] =&gt; &quot;-&quot;,
+                T![*] =&gt; &quot;*&quot;,
+                T![/] =&gt; &quot;/&quot;,
+                T![^] =&gt; &quot;^&quot;,
+                T![=] =&gt; &quot;=&quot;,
+                T![.] =&gt; &quot;.&quot;,
+                T![,] =&gt; &quot;,&quot;,
+                T![_] =&gt; &quot;_&quot;,
+                T![!] =&gt; &quot;!&quot;,
+                T![&amp;] =&gt; &quot;&amp;&quot;,
+                T![|] =&gt; &quot;|&quot;,
+                T![:] =&gt; &quot;:&quot;,
+                T![;] =&gt; &quot;;&quot;,
+                // Brackets
+                T![&lt;] =&gt; &quot;&lt;&quot;,
+                T![&gt;] =&gt; &quot;&gt;&quot;,
+                T!['['] =&gt; &quot;[&quot;,
+                T![']'] =&gt; &quot;]&quot;,
+                T!['{'] =&gt; &quot;{&quot;,
+                T!['}'] =&gt; &quot;}&quot;,
+                T!['('] =&gt; &quot;(&quot;,
+                T![')'] =&gt; &quot;)&quot;,
+                // Multiple characters
+                T![string] =&gt; &quot;String&quot;,
+                T![comment] =&gt; &quot;// Comment&quot;,
+                T![int] =&gt; &quot;Int&quot;,
+                T![float] =&gt; &quot;Float&quot;,
+                T![ident] =&gt; &quot;Identifier&quot;,
+                T![let] =&gt; &quot;let&quot;,
+                T![fn] =&gt; &quot;fn&quot;,
+                T![struct] =&gt; &quot;struct&quot;,
+                T![if] =&gt; &quot;if&quot;,
+                T![else] =&gt; &quot;else&quot;,
+                // Operators
+                T![&amp;&amp;] =&gt; &quot;&amp;&amp;&quot;,
+                T![||] =&gt; &quot;||&quot;,
+                T![==] =&gt; &quot;==&quot;,
+                T![!=] =&gt; &quot;!=&quot;,
+                T![&gt;=] =&gt; &quot;&gt;=&quot;,
+                T![&lt;=] =&gt; &quot;&lt;=&quot;,
+                // Misc 
+                T![error] =&gt; &quot;&lt;?&gt;&quot;,
+                T![ws] =&gt; &quot;&lt;WS&gt;&quot;,
+                T![EOF] =&gt; &quot;&lt;EOF&gt;&quot;,
+            }
+        )
+    }
+}
+</code></pre>
+<p>Again we've got ourselves a small wall of text, but we can now add a small test to check everything works as it should so far:</p>
+<pre><code class="language-rust" data-lang="rust">#[cfg(test)]
+mod tests {
+    #[test]
+    fn token_kind_display() {
+        assert_eq!(T![+].to_string(), &quot;+&quot;);
+        assert_eq!(T![&lt;=].to_string(), &quot;&lt;=&quot;);
+        assert_eq!(T![let].to_string(), &quot;let&quot;);
+        assert_eq!(T![error].to_string(), &quot;&lt;?&gt;&quot;);
+        assert_eq!(T![comment].to_string(), &quot;// Comment&quot;);
+    }
+}
+</code></pre>
+<h3 id="tokens"><a class="zola-anchor" href="#tokens" aria-label="Anchor link for: tokens">🔗</a>Tokens</h3>
+<p>We can now go to define our tokens.
+They will store the kind of token, of course, as one of the <code>TokenKind</code>s we just defined.
+The other thing we'll want to know from our tokens is, well, <em>what</em> they are.
+For example, if in the parser we see a token that we did not expect, we want to produce an error, which benefits a lot from including in the error message what the user actually typed.</p>
+<p>One option would be to use Rust's amazing enums and include things like the name of an identifier or numbers in their respective variants.
+I personally don't like this approach as much, because it makes tokens be all over the place - some have just their kind, some have an additional string, some have a number, ...
+What about just including the the string of a token in <em>all</em> of the tokens?
+This would make the tokens equal again, but also we'd have to take all of these tiny strings out of the string we already have - the input string.
+Strings mean allocations, and with strings our tokens will not be <code>Copy</code>.</p>
+<p>Instead, we will make use of <em>spans</em>.
+A span is simply two positions representing the start and the end of the token in the input string.
+Rust has a type like this in its standard library: <code>Range</code>.
+However, <code>Range</code> has some quirks that make it less nice to work with than I would like (in particular, for reasons that have no place in this post, it is also not <code>Copy</code> even if you make only a <code>Range&lt;usize&gt;</code>).
+Let's thus make our own small <code>Span</code> type that can be converted to and from <code>Range&lt;usize&gt;</code>:</p>
+<pre><code class="language-rust" data-lang="rust">// In token.rs
+
+#[derive(Eq, PartialEq, Clone, Copy, Hash, Default, Debug)]
+pub struct Span {
+    /// inclusive
+    pub start: u32,
+    /// exclusive
+    pub end:   u32,
+}
+
+impl From&lt;Span&gt; for Range&lt;usize&gt; {
+    fn from(span: Span) -&gt; Self {
+        span.start as usize..span.end as usize
+    }
+}
+
+impl From&lt;Range&lt;usize&gt;&gt; for Span {
+    fn from(range: Range&lt;usize&gt;) -&gt; Self {
+        Self {
+            start: range.start as u32,
+            end:   range.end as u32,
+        }
+    }
+}
+</code></pre>
+<p>We can also add the ability to directly index strings with our spans:</p>
+<pre><code class="language-rust" data-lang="rust">impl Index&lt;Span&gt; for str {
+    type Output = str;
+
+    fn index(&amp;self, index: Span) -&gt; &amp;Self::Output {
+        &amp;self[Range::&lt;usize&gt;::from(index)]
+    }
+}
+</code></pre>
+<p>Our tokens will then have a <code>TokenKind</code> and a <code>Span</code> and, given the input string, will be able to return the text they represent via the span:</p>
+<pre><code class="language-rust" data-lang="rust">#[derive(Eq, PartialEq, Copy, Clone, Hash)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub span: Span,
+}
+
+impl Token {
+    pub fn len(&amp;self) -&gt; usize {
+        (self.span.end - self.span.start) as usize
+    }
+
+    pub fn text&lt;'input&gt;(&amp;self, input: &amp;'input str) -&gt; &amp;'input str {
+        &amp;input[self.span]
+    }
+}
+</code></pre>
+<p>We'll make <code>Token</code>'s <code>Display</code> forward to its <code>kind</code>, but let its <code>Debug</code> also show the span:</p>
+<pre><code class="language-rust" data-lang="rust">impl fmt::Debug for Token {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        write!(f, &quot;{:?} - &lt;{}, {}&gt;&quot;, self.kind, self.span.start, self.span.end)
+    }
+}
+
+impl fmt::Display for Token {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        write!(f, &quot;{}&quot;, self.kind)
+    }
+}
+</code></pre>
+<h3 id="lexer-rules"><a class="zola-anchor" href="#lexer-rules" aria-label="Anchor link for: lexer-rules">🔗</a>Lexer Rules</h3>
+<p>Now, let's talk about how to compute the next token for some input.
+For the single-character tokens, that seems quite easy - we see a <code>+</code>, we make a plus token.
+But what about longer and more complicated tokens, like floating point numbers?
+And what the next few characters could be <em>multiple</em> kinds of token?
+Seeing a <code>=</code> character, we would classify that as an &quot;equals sign&quot; token <em>except</em> there might be another <code>=</code> following it, in which case maybe it's a comparison operator (<code>T![==]</code>)?
+Or maybe it's just two equals signs next to each other? 
+When we see <code>let</code>, how do we know it's a keyword and not the name of a variable?</p>
+<p>If we look at some common lexer and parser generators to see how they have you write down parsing rules (look, just because we're not using one, doesn't mean we can't take a peek, eh?), we find a large variety of regular expressions.
+Now, I may be fine with using regular expressions for the more complex tokens, but for something as simple as <code>+</code> they do seem a bit overkill.
+Also, these generators have the advantage that they can optimize the regular expressions of all tokens together, which I will not do by hand in this blog post (or probably ever).
+Let start with the simple cases and work our way up.
+In our <code>lexer</code> mod, we create a (for now fairly uninteresting) <code>Lexer</code> struct and give it a method to lex a single token:</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/mod.rs
+
+pub struct Lexer;
+
+impl Lexer {
+    pub fn new() -&gt; Self {
+        Self {}
+    }
+
+    /// Returns `None` if the lexer cannot find a token at the start of `input`.
+    fn valid_token(&amp;self, input: &amp;str) -&gt; Option&lt;Token&gt; {
+        let next = input.chars().next().unwrap();
+        let (len, kind) = if let Some(kind) = unambiguous_single_char(next) {
+            (1, kind)
+        } else {
+            return None;
+        };
+
+        Some(Token {
+            kind,
+            // We will fix this later
+            span: Span { start: 0, end: len },
+        })
+    }
+}
+</code></pre>
+<p>We will put all the lexer rules in a separate file, so we'll implement <code>unambiguous_single_char</code> in a new <code>lexer</code> module <code>rules</code>:</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/rules.rs
+
+/// If the given character is a character that _only_ 
+/// represents a token of length 1,
+/// this method returns the corresponding `TokenKind`.
+/// Note that this method will return `None` for characters 
+/// like `=` that may also occur at the first position 
+/// of longer tokens (here `==`).
+pub(crate) const fn unambiguous_single_char(c: char) -&gt; Option&lt;TokenKind&gt; {
+    Some(match c {
+        '+' =&gt; T![+],
+        '-' =&gt; T![-],
+        '*' =&gt; T![*],
+        '^' =&gt; T![^],
+        '.' =&gt; T![.],
+        ',' =&gt; T![,],
+        '[' =&gt; T!['['],
+        ']' =&gt; T![']'],
+        '{' =&gt; T!['{'],
+        '}' =&gt; T!['}'],
+        '(' =&gt; T!['('],
+        ')' =&gt; T![')'],
+        ':' =&gt; T![:],
+        ';' =&gt; T![;],
+        _ =&gt; return None,
+    })
+}
+</code></pre>
+<p>The method is essentially the revers of the <code>Display</code> implementation, but only for tokens that are one character long <em>and cannot be the start of anything else</em>.
+So it includes <code>+</code> and most of the brackets, but, for example, it does not include <code>=</code>, because of the possible <code>==</code>, and <code>/</code>, because that can also be the start of a comment.
+Angle brackets are absent because they can also be the start of <code>&lt;=</code> and <code>&gt;=</code><sup class="footnote-reference"><a href="#shift-ops">2</a></sup><span id="fn-shift-ops"></span>.</p>
+<p>We can also start thinking about what to do when the user inputs something we don't know (yet).
+If we can't make a token at the start of the input, we'll look ahead until we can and emit an <code>Error</code> token for the characters we've had to skip over:</p>
+<pre><code class="language-rust" data-lang="rust">pub fn next_token(&amp;self, input: &amp;str) -&gt; Token {
+    self.valid_token(input).unwrap_or_else(|| self.invalid_token(input))
+}
+
+/// Always &quot;succeeds&quot;, because it creates an error `Token`.
+fn invalid_token(&amp;self, input: &amp;str) -&gt; Token {
+    let len = input
+        .char_indices()
+        .find(|(pos, _)| self.valid_token(&amp;input[*pos..]).is_some())
+        .map(|(pos, _)| pos)
+        .unwrap_or_else(|| input.len());
+    debug_assert!(len &lt;= input.len());
+    Token {
+        kind: T![error],
+        span: Span {
+            start: 0,
+            end:   len as u32,
+        },
+    }
+}
+</code></pre>
+<p>At long last, we can write a function that works through an entire input string and converts it into tokens:</p>
+<pre><code class="language-rust" data-lang="rust">pub fn tokenize(&amp;self, input: &amp;str) -&gt; Vec&lt;Token&gt; {
+    let mut ret = Vec::new();
+    let mut suffix = input;
+    while !suffix.is_empty() {
+        let token = self.next_token(suffix);
+        ret.push(token);
+        suffix = &amp;suffix[token.len()..];
+    }
+    ret.push(Token {
+        kind: T![EOF],
+        span: Span {
+            start: input.len() as u32,
+            end:   input.len() as u32,
+        },
+    });
+    ret
+}
+</code></pre>
+<p>Let's create a small integration test for the tokens that should work already:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+use parsing_basics::{lexer::*, T};
+
+/// walks `$tokens` and compares them to the given kinds.
+macro_rules! assert_tokens {
+    ($tokens:ident, [$($kind:expr,)*]) =&gt; {
+        {
+            let mut it = $tokens.iter();
+            $(
+                let token = it.next().expect(&quot;not enough tokens&quot;);
+                assert_eq!(token.kind, $kind);
+            )*
+        }
+    };
+}
+
+#[test]
+fn single_char_tokens() {
+    let lexer = Lexer::new();
+    let input = &quot;+-(.):&quot;;
+    let tokens = lexer.tokenize(input);
+    assert_tokens!(tokens, [T![+], T![-], 
+        T!['('], T![.], T![')'], T![:], T![EOF],]);
+}
+
+#[test]
+fn unknown_input() {
+    let lexer = Lexer::new();
+    let input = &quot;{$$$$$$$+&quot;;
+    let tokens = lexer.tokenize(input);
+    assert_tokens!(tokens, [T!['{'], T![error], T![+], T![EOF],]);
+}
+</code></pre>
+<h4 id="making-our-lexer-an-iterator"><a class="zola-anchor" href="#making-our-lexer-an-iterator" aria-label="Anchor link for: making-our-lexer-an-iterator">🔗</a>Making our Lexer an Iterator</h4>
+<p>While our lexer produces the correct <em>kinds</em> of tokens, currently all tokens are created with the span <code>0..1</code>.
+To fix that, we'll have to keep track of where the lexer is currently positioned in the input string.
+We'll take this opportunity to have the lexer take a reference to the input string.
+This means that it will now need to have a lifetime, but also has advantages - it lets us resolve tokens to their text through the lexer, and we can make the lexer an iterator:</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/mod.rs
+
+pub struct Lexer&lt;'input&gt; {
+    input:    &amp;'input str,
+    position: u32,
+    eof:      bool,
+}
+
+impl&lt;'input&gt; Lexer&lt;'input&gt; {
+    pub fn new(input: &amp;'input str) -&gt; Self {
+        Self { input, position: 0, eof: false }
+    }
+
+    pub fn tokenize(&amp;mut self) -&gt; Vec&lt;Token&gt; {
+        self.collect()
+    }
+
+    // ... unchanged
+}
+
+impl&lt;'input&gt; Iterator for Lexer&lt;'input&gt; {
+    type Item = Token;
+
+    fn next(&amp;mut self) -&gt; Option&lt;Self::Item&gt; {
+        if self.position as usize &gt;= self.input.len() {
+            if self.eof {
+                return None;
+            }
+            self.eof = true;
+            Some(Token {
+                kind: T![EOF],
+                span: Span {
+                    start: self.position,
+                    end:   self.position,
+                },
+            })
+        } else {
+            Some(self.next_token(&amp;self.input[self.position as usize..]))
+        }
+    }
+}
+</code></pre>
+<p>At this point, we should be able to adapt our tests to pass the input to the lexer and they should pass as before.
+Note that all of our <code>Lexer</code> methods will now take <code>&amp;mut self</code>, because we have to update our <code>position</code>.
+You'll have to make the <code>lexer</code> variables <code>mut</code> in the tests so everything keeps working.</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn single_char_tokens() {
+    let input = &quot;+-(.):&quot;;
+    let mut lexer = Lexer::new(input); // &lt;- new
+    let tokens = lexer.tokenize(); // &lt;- removed `input`
+    assert_tokens!(tokens, [T![+], T![-], 
+        T!['('], T![.], T![')'], T![:], T![EOF],]);
+}
+
+#[test]
+fn unknown_input() {
+    let input = &quot;{$$$$$$$+&quot;;
+    let mut lexer = Lexer::new(input); // &lt;- new
+    let tokens = lexer.tokenize(); // &lt;- removed `input`
+    assert_tokens!(tokens, [T!['{'], T![error], T![+], T![EOF],]);
+}
+</code></pre>
+<p>Let's actually fix the spans now:</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/mod.rs
+
+/// Returns `None` if the lexer cannot find a token at the start of `input`.
+    fn valid_token(&amp;mut self, input: &amp;str) -&gt; Option&lt;Token&gt; {
+        let next = input.chars().next().unwrap();
+        let (len, kind) = if let Some(kind) = unambiguous_single_char(next) {
+            (1, kind)
+        } else {
+            return None;
+        };
+
+        // NEW!
+        let start = self.position;
+        self.position += len;
+        Some(Token {
+            kind,
+            span: Span {
+                start,
+                end: start + len,
+            },
+        })
+    }
+
+    /// Always &quot;succeeds&quot;, because it creates an error `Token`.
+    fn invalid_token(&amp;mut self, input: &amp;str) -&gt; Token {
+        let start = self.position; // &lt;- NEW!
+        let len = input
+            .char_indices()
+            .find(|(pos, _)| self.valid_token(&amp;input[*pos..]).is_some())
+            .map(|(pos, _)| pos)
+            .unwrap_or_else(|| input.len());
+        debug_assert!(len &lt;= input.len());
+
+        // NEW!
+        // Because `valid_token` advances our position, 
+        // we need to reset it to after the errornous token.
+        let len = len as u32;
+        self.position = start + len;
+        Token {
+            kind: T![error],
+            span: Span {
+                start,
+                end: start + len,
+            },
+        }
+    }
+</code></pre>
+<p>We'll also add a small test for token spans:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn token_spans() {
+    {
+        let input = &quot;+-(.):&quot;;
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize();
+        let dot = tokens[3];
+        assert_eq!(dot.kind, T![.]);
+        assert_eq!(dot.span, (3..4).into())
+    }
+    {
+        let input = &quot;{$$$$$$$+&quot;;
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize();
+        let error = tokens[1];
+        assert_eq!(error.kind, T![error]);
+        assert_eq!(error.span, (1..8).into())
+    }
+}
+</code></pre>
+<h4 id="whitespace"><a class="zola-anchor" href="#whitespace" aria-label="Anchor link for: whitespace">🔗</a>Whitespace</h4>
+<p>Whitespace is special enough for us to handle on its own, mainly because there will probably be a lot of it and it is also a class which can never conflict with anything else - either a character is whitespace, or it is not.
+Successive whitespace characters are also grouped together into a single token:</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/mod.rs
+
+/// Returns `None` if the lexer cannot find a token at the start of `input`.
+fn valid_token(&amp;mut self, input: &amp;str) -&gt; Option&lt;Token&gt; {
+    let next = input.chars().next().unwrap();
+    let (len, kind) = if next.is_whitespace() {
+        (
+            input
+                .char_indices()
+                .take_while(|(_, c)| c.is_whitespace())
+                .last()
+                .unwrap() // we know there is at least one whitespace character
+                .0 as u32
+                + 1,
+            T![ws],
+        )
+    } else if let Some(kind) = unambiguous_single_char(next) {
+        (1, kind)
+    } else {
+        return None;
+    };
+
+    // create the token, unchanged
+}
+</code></pre>
+<p>We can copy one of our basic tests and add some whitespace to see this works:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn single_char_tokens_with_whitespace() {
+    let input = &quot;   + -  (.): &quot;;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize();
+    let leading_space = &amp;tokens[0];
+    assert_eq!(leading_space.kind, T![ws]);
+    assert_eq!(leading_space.len(), 3);
+
+    let space_after_minus = &amp;tokens[4];
+    assert_eq!(space_after_minus.kind, T![ws]);
+    assert_eq!(space_after_minus.len(), 2);
+
+    let trailing_space = &amp;tokens[9];
+    assert_eq!(trailing_space.kind, T![ws]);
+    assert_eq!(trailing_space.len(), 1);
+
+    let tokens: Vec&lt;_&gt; = tokens
+        .into_iter()
+        .filter(|t| t.kind != T![ws])
+        .collect();
+    assert_tokens!(
+        tokens,
+        [T![+], T![-], T!['('], T![.], T![')'], T![:], T![EOF],]
+    );
+}
+</code></pre>
+<h4 id="other-rules"><a class="zola-anchor" href="#other-rules" aria-label="Anchor link for: other-rules">🔗</a>Other Rules</h4>
+<p>We've seen before that for the remaining tokens we need a general mechanism to determine which class they belong to.
+We'll say that a general lexer rule is a function which returns if and how many input characters it could match to the token kind it is for and start with the remaining one- and two-character tokens and the keywords:</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/rules.rs
+
+pub(crate) struct Rule {
+    pub kind:    TokenKind,
+    pub matches: fn(&amp;str) -&gt; Option&lt;u32&gt;,
+}
+
+fn match_single_char(input: &amp;str, c: char) -&gt; Option&lt;u32&gt; {
+    input.chars().next()
+        .and_then(|ch| if ch == c { Some(1) } else { None })
+}
+
+fn match_two_chars(input: &amp;str, first: char, second: char) -&gt; Option&lt;u32&gt; {
+    if input.len() &gt;= 2 {
+        match_single_char(input, first)
+            .and_then(|_| {
+                match_single_char(&amp;input[1..], second)
+                    .map(|_| 2)
+            })
+    } else {
+        None
+    }
+}
+
+fn match_keyword(input: &amp;str, keyword: &amp;str) -&gt; Option&lt;u32&gt; {
+    input.starts_with(keyword)
+        .then(|| keyword.len() as u32)
+}
+
+pub(crate) fn get_rules() -&gt; Vec&lt;Rule&gt; {
+    vec![
+        Rule {
+            kind:    T![!],
+            matches: |input| match_single_char(input, '!'),
+        },
+        Rule {
+            kind:    T![=],
+            matches: |input| match_single_char(input, '='),
+        },
+        Rule {
+            kind:    T![/],
+            matches: |input| match_single_char(input, '/'),
+        },
+        Rule {
+            kind:    T![_],
+            matches: |input| match_single_char(input, '_'),
+        },
+        Rule {
+            kind:    T![&lt;],
+            matches: |input| match_single_char(input, '&lt;'),
+        },
+        Rule {
+            kind:    T![&gt;],
+            matches: |input| match_single_char(input, '&gt;'),
+        },
+        Rule {
+            kind:    T![==],
+            matches: |input| match_two_chars(input, '=', '='),
+        },
+        Rule {
+            kind:    T![!=],
+            matches: |input| match_two_chars(input, '!', '='),
+        },
+        Rule {
+            kind:    T![&amp;&amp;],
+            matches: |input| match_two_chars(input, '&amp;', '&amp;'),
+        },
+        Rule {
+            kind:    T![||],
+            matches: |input| match_two_chars(input, '|', '|'),
+        },
+        Rule {
+            kind:    T![&lt;=],
+            matches: |input| match_two_chars(input, '&lt;', '='),
+        },
+        Rule {
+            kind:    T![&gt;=],
+            matches: |input| match_two_chars(input, '&gt;', '='),
+        },
+        Rule {
+            kind:    T![let],
+            matches: |input| match_keyword(input, &quot;let&quot;),
+        },
+        Rule {
+            kind:    T![fn],
+            matches: |input| match_keyword(input, &quot;fn&quot;),
+        },
+        Rule {
+            kind:    T![struct],
+            matches: |input| match_keyword(input, &quot;struct&quot;),
+        },
+        Rule {
+            kind:    T![if],
+            matches: |input| match_keyword(input, &quot;if&quot;),
+        },
+        Rule {
+            kind:    T![else],
+            matches: |input| match_keyword(input, &quot;else&quot;),
+        },
+    ]
+}
+</code></pre>
+<p>In the lexer, we plug in the new rules where the input is neither whitespace nor clearly a single character:</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/mod.rs
+
+pub struct Lexer&lt;'input&gt; {
+    input:    &amp;'input str,
+    position: u32,
+    eof:      bool,
+    rules:    Vec&lt;Rule&gt;, // &lt;- NEW!
+}
+
+
+impl&lt;'input&gt; Lexer&lt;'input&gt; {
+    pub fn new(input: &amp;'input str) -&gt; Self {
+        Self {
+            input,
+            position: 0,
+            eof: false,
+            rules: rules::get_rules(), // &lt;- NEW!
+        }
+    }
+
+    /// Returns `None` if the lexer cannot find a token at the start of `input`.
+    fn valid_token(&amp;mut self, input: &amp;str) -&gt; Option&lt;Token&gt; {
+        let next = input.chars().next().unwrap();
+        let (len, kind) = if next.is_whitespace() {
+            // snip
+        } else if let Some(kind) = unambiguous_single_char(next) {
+            (1, kind)
+        } else {
+            self.rules
+                .iter()
+                // `max_by_key` returns the last element if multiple
+                // rules match, but we want earlier rules to &quot;win&quot; 
+                // against later ones
+                .rev()
+                .filter_map(|rule| Some(((rule.matches)(input)?, rule.kind)))
+                .max_by_key(|&amp;(len, _)| len)?
+        };
+
+        // create the token, unchanged
+    }
+
+    // ...remaining functions unchanged
+}
+</code></pre>
+<p>If the simpler cases don't trigger, we iterate over all our rules and, for each <code>rule</code>, check if it <code>matches</code> the <code>input</code>.
+We then select <em>the rule that matches the longest piece of the input</em>, that is, the most input characters.
+This choice is commonly known as <a href="https://en.m.wikipedia.org/wiki/Maximal_munch">the &quot;maximal munch&quot; principle</a> and makes it so two successive <code>=</code> become <code>==</code><sup class="footnote-reference"><a href="#max-munch">3</a></sup><span id="fn-max-munch"></span>.
+Moreover, it is consistent with grouping a sequence of digits all together as an <code>Int</code>, or letters as an <code>Identifier</code> (which we'll do next).
+Note also that we decide to resolve conflicts between tokens of <em>the same length</em> by choosing the rule that was written first.
+We will write the rules from least to most general, so things like identifiers will be plugged in at the back.</p>
+<p>Speaking of identifiers, we'll make some quick tests for our new rules and then we'll finally handle them.
+Here are the new tests:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn maybe_multiple_char_tokens() {
+    let input = &quot;&amp;&amp;=&lt;=_!=||&quot;;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize();
+    assert_tokens!(tokens, [
+        T![&amp;&amp;], T![=], T![&lt;=], T![_], T![!=], T![||], T![EOF],
+    ]);
+
+
+#[test]
+fn keywords() {
+    let input = &quot;if let = struct else fn&quot;;
+    let mut lexer = Lexer::new(input);
+    let tokens: Vec&lt;_&gt; = lexer.tokenize().into_iter()
+        .filter(|t| t.kind != T![ws]).collect();
+    assert_tokens!(tokens, [
+        T![if], T![let], T![=], T![struct], T![else], T![fn], T![EOF],
+    ]);
+}
+</code></pre>
+<p>Let's get to the big boys.
+For this post, we <em>will</em> use regular expressions here.
+This means we need to add the <code>regex</code> crate to the project.
+Since we'll need to put our regexes somewhere, we also add the <code>lazy_static</code> crate.
+While we're at it, we add <code>unindent</code> as a <code>dev-dependency</code> as well.
+<code>unindent</code> is a small utility to, well, unindent text, to help us write a full test for the lexer after we've added the missing rules.
+Because users of our lexer don't run the tests, they don't need to have <code>unindent</code>, which is why it doesn't go into the regular <code>dependencies</code>:</p>
+<pre><code class="language-toml" data-lang="toml">[dependencies]
+regex = &quot;1&quot;
+lazy_static = &quot;1&quot;
+
+[dev-dependencies]
+unindent = &quot;0.1&quot;
+</code></pre>
+<p>We add a matching function for regex-based rules which queries the regex (conveniently, <code>Regex::find</code> returns an <code>Option</code>) and the regexes themselves.
+We then make new rules that use <code>match_regex</code> and extend our ruleset with them.
+I skipped <code>T![int]</code> integer literals with the regexes and instead gave them their own little rule which works the same way we handle whitespace (it's still important to have a rule for this though, because integers and floats can conflict):</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/rules.rs
+
+fn match_regex(input: &amp;str, r: &amp;Regex) -&gt; Option&lt;u32&gt; {
+    r.find(input).map(|regex_match| regex_match.end() as u32)
+}
+
+lazy_static! {
+    static ref STRING_REGEX: Regex = 
+        Regex::new(r#&quot;^&quot;((\\&quot;|\\\\)|[^\\&quot;])*&quot;&quot;#).unwrap();
+    static ref COMMENT_REGEX: Regex = 
+        Regex::new(r#&quot;^//[^\n]*\n&quot;#).unwrap();
+    static ref FLOAT_REGEX: Regex = 
+        Regex::new(r#&quot;^((\d+(\.\d+)?)|(\.\d+))([Ee](\+|-)?\d+)?&quot;#).unwrap();
+    static ref IDENTIFIER_REGEX: Regex = 
+        Regex::new(r##&quot;^([A-Za-z]|_)([A-Za-z]|_|\d)*&quot;##).unwrap();
+}
+
+pub(crate) fn get_rules() -&gt; Vec&lt;Rule&gt; {
+    vec![
+        // ...rules from before
+        Rule {
+            kind:    T![string],
+            matches: move |input| match_regex(input, &amp;STRING_REGEX),
+        },
+        Rule {
+            kind:    T![comment],
+            matches: move |input| match_regex(input, &amp;COMMENT_REGEX),
+        },
+        Rule {
+            kind:    T![int],
+            matches: |input| {
+                input
+                    .char_indices()
+                    .take_while(|(_, c)| c.is_ascii_digit())
+                    .last()
+                    .map(|(pos, _)| pos as u32 + 1)
+            },
+        },
+        Rule {
+            kind:    T![float],
+            matches: |input| match_regex(input, &amp;FLOAT_REGEX),
+        },
+        Rule {
+            kind:    T![ident],
+            matches: |input| match_regex(input, &amp;IDENTIFIER_REGEX),
+        },
+    ]
+}
+</code></pre>
+<p>Have a look at <a href="https://docs.rs/regex/1.5.3/regex/#syntax">the <code>regex</code> crate's documentation</a> to learn how the regular expressions are specified.
+I write them in <em>raw string literals</em>, which go from <code>r#&quot;</code> to <code>&quot;#</code>.
+All regular expressions are <em>anchored</em> with the starting <code>^</code>, which forces them to match the input from the start and excludes matches anywhere else later in the input.
+Then, a string is a sequence of characters in quotation marks (<code>&quot;</code>), optionally including an escaped quotation mark (<code>\&quot;</code>) or backslash (<code>\\</code>).
+A line comment starts with <code>//</code> and ends at the end of the line.
+A floating point number is some digits, maybe followed by a period and more digits, or alternatively it may also start with the period.
+It may be followed by <code>E</code> or <code>e</code>, an optional sign and more digits to allow scientific notation.
+An identifier is any variable name, for which we require to start with a letter or underscore, and then also allow digits for the characters after the first.</p>
+<p>Time to try it out!
+We'll add two tests, a function and a struct definition:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn function() {
+    let input = r#&quot;
+        // tests stuff
+        fn test(var: Type, var2_: bool) {
+            let x = &quot;String content \&quot; test&quot; + 7 / 27.3e-2^4;
+            let chars = x.chars();
+            if let Some(c) = chars.next() {
+                x = x + c;
+            } else if !var2_ {
+                x = x + &quot;,&quot;;
+            }
+        }
+    &quot;#;
+    let input = unindent(input);
+    let mut lexer = Lexer::new(input.as_str());
+    let tokens: Vec&lt;_&gt; = lexer.tokenize().into_iter()
+        .filter(|t| t.kind != T![ws]).collect();
+    assert_tokens!(tokens, [
+        // comment
+        T![comment], 
+        // function signature
+        T![fn], T![ident], T!['('], 
+            T![ident], T![:], T![ident], T![,], 
+            T![ident], T![:], T![ident], 
+        T![')'], T!['{'], 
+            // `x` assignment
+            T![let], T![ident], T![=], T![string], T![+], T![int], 
+                T![/], T![float], T![^], T![int], T![;], 
+            // `chars` assignment
+            T![let], T![ident], T![=], T![ident], 
+                T![.], T![ident], T!['('], T![')'], T![;],
+            // if
+            T![if], T![let], T![ident], T!['('], T![ident], T![')'], T![=], 
+                T![ident], T![.], T![ident], T!['('], T![')'], 
+            T!['{'], 
+                // `x` re-assignment
+                T![ident], T![=], T![ident], T![+], T![ident], T![;],
+            // else if
+            T!['}'], T![else], T![if], T![!], T![ident], T!['{'], 
+                // `x` re-assignment
+                T![ident], T![=], T![ident], T![+], T![string], T![;], 
+            T!['}'], // end if
+        T!['}'], // end fn
+        T![EOF],
+    ]);
+}
+
+#[test]
+fn struct_def() {
+    let input = r#&quot;
+        struct Foo&lt;T&gt; {
+            bar: Bar&lt;T&gt;,
+        }
+    &quot;#;
+    let input = unindent(input);
+    let input = input.as_str();
+    let mut lexer = Lexer::new(input);
+    let tokens: Vec&lt;_&gt; = lexer.tokenize().into_iter().filter(|t| t.kind != T![ws]).collect();
+    assert_tokens!(tokens, [
+        // struct definition/type
+        T![struct], T![ident], T![&lt;], T![ident], T![&gt;], T!['{'], 
+            // member `bar` of type `Bar&lt;T&gt;`
+            T![ident], T![:], T![ident], T![&lt;], T![ident], T![&gt;],T![,], 
+        T!['}'], // end struct
+        T![EOF],
+    ]);
+    let bar = tokens[6];
+    assert_eq!(bar.span, (20..23).into()); // unindented span
+}
+</code></pre>
+<p>Note that the comment before the <code>fn test</code> is correctly recognized as a comment, while in the assignment to <code>x</code> there is a single <code>/</code> for division.
+This is because the comment is longer than a single slash, so it wins against the single character rule.
+The same happens for the floating point number in the same assignment.
+Our keywords are also recognized correctly.
+They do match as identifiers as well, but their rules are declared earlier than the identifier rule, so our lexer gives them precedence.</p>
+<h4 id="some-source-text"><a class="zola-anchor" href="#some-source-text" aria-label="Anchor link for: some-source-text">🔗</a>Some Source Text</h4>
+<p>We'll extend that last text with a few checks for identifiers to illustrate how to get back at the input string from a token:</p>
+<pre><code class="language-rust" data-lang="rust">#[test]
+fn struct_def() {
+    // `input`, `lexer` and `tokens`, unchanged
+
+    let bar = tokens[6];
+    assert_eq!(bar.span, (20..23).into()); 
+    assert_eq!(bar.text(input), &quot;bar&quot;); // &lt;- NEW!
+
+    let foo = tokens[1];
+    assert_eq!(foo.text(input), &quot;Foo&quot;); // &lt;- NEW!
+}
+</code></pre>
+<p>One lexer, done.<br><br></p>
+<h3 id="the-parser"><a class="zola-anchor" href="#the-parser" aria-label="Anchor link for: the-parser">🔗</a>The Parser</h3>
+<p>Our next big task is to re-arrange the lexer tokens into a nice tree that represents our input program.
+We'll need a little bit of setup, starting with defining the AST we want to parse into.
+All of our parser-related stuff will go into a new <code>parser</code> module with submodules, like <code>ast</code>:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/ast.rs
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Literal(Lit),
+    Ident(String),
+    FnCall { fn_name: String, args: Vec&lt;Expr&gt; },
+    PrefixOp { op: TokenKind, expr: Box&lt;Expr&gt; },
+    InfixOp { op: TokenKind, lhs: Box&lt;Expr&gt;, rhs: Box&lt;Expr&gt; },
+    PostfixOp { op: TokenKind, expr: Box&lt;Expr&gt; },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lit {
+    Int(usize),
+    Float(f64),
+    Str(String),
+}
+</code></pre>
+<p>We have 3 kinds of literal, corresponding to <code>T![int]</code>, <code>T![float]</code> and <code>T![string]</code>.
+Identifiers store their name, and function call expressions store the name of the function and what was passed as its arguments.
+The arguments are themselves expressions, because you can call functions like <code>sin(x + max(y, bar.z))</code>.</p>
+<p>Expressions with operators are categorized into three classes:</p>
+<ul>
+<li><strong>Prefix</strong> operators are unary operators that come before an expression, like in <code>-2.4</code> or <code>!this_is_a_bool</code>. </li>
+<li><strong>Postfix</strong> operators are also unary operators, but those that come <em>after</em> an expression. For us, this will only be the faculty operator <code>4!</code>.</li>
+<li><strong>Infix</strong> operators are the binary operators like <code>a + b</code> or <code>c ^ d</code>, where <code>a</code> and <code>c</code> would be the left-hand sides <code>lhs</code>, and <code>b</code> and <code>d</code> are the right-hand sides <code>rhs</code>.
+This is not the only way to structure your AST.
+Some people prefer having an explicit <code>Expr</code> variant for each operator, so you'd have <code>Expr::Add</code>, <code>Expr::Sub</code>, <code>Expr::Not</code> and so on.
+If you use those then of course you don't have to store the kind of operator in the AST, but I'm going with the more generic approach here, both because I personally prefer it and because it means less copy-pasting and smaller code blocks for this article.</li>
+</ul>
+<p>Note that the AST <em>discards</em> some information: 
+When calling a function <code>bar(x, 2)</code>, I have to write not only the name and arguments, but also parentheses and commas.
+Whitespace is also nowhere to be found, and I can tell you already that we will not have any methods that handle comments (well, apart from figuring out how we don't have to deal with them).
+This is a major reason why the AST is called the <strong>abstract</strong> syntax tree; we keep input data only if it matters to us.
+For other application, like an IDE, those things that we throw away here may matter a great deal, e.g., to format a file or show documentation.
+In such cases, other representations are often used, such as <strong>concrete</strong> syntax trees (CSTs) that retain a lot more information.</p>
+<h4 id="parser-input"><a class="zola-anchor" href="#parser-input" aria-label="Anchor link for: parser-input">🔗</a>Parser Input</h4>
+<p>I can tell you from personal experience that having to manually skip over whitespace and comments everywhere in a parser is not fun.
+When we made the lexer tests in the last section, we filtered out all such tokens from the lexer output before comparing them to what we expected, except where we specifically wanted to test the whitespace handling.
+In principle, our parser will have a <code>Lexer</code> iterator inside and query it for new tokens when it needs them.
+The <code>Iterator::filter</code> adapter that we used in the tests has the annoying property, however, that it is really hard to name, because its predicate (the function that decides what to filter out) is part of its type.
+We will thus build our own small iterator around the lexer, which will filter the tokens for us:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/mod.rs
+
+pub struct TokenIter&lt;'input&gt; {
+    lexer: Lexer&lt;'input&gt;,
+}
+
+impl&lt;'input&gt; TokenIter&lt;'input&gt; {
+    pub fn new(input: &amp;'input str) -&gt; Self {
+        Self { lexer: Lexer::new(input) }
+    }
+}
+
+impl&lt;'input&gt; Iterator for TokenIter&lt;'input&gt; {
+    type Item = Token;
+
+    fn next(&amp;mut self) -&gt; Option&lt;Self::Item&gt; {
+        loop {
+            let next_token = self.lexer.next()?;
+            if !matches!(next_token.kind, T![ws] | T![comment]) {
+                return Some(next_token);
+            } // else continue
+        }
+    }
+}
+</code></pre>
+<p>I don't think we've used the <code>matches!</code> macro before.
+It is basically just a short form of writing</p>
+<pre><code class="language-rust" data-lang="rust">match next_token.kind {
+    T![ws] | T![comment] =&gt; true,
+    _ =&gt; false,
+}
+</code></pre>
+<p>though I admit <code>!matches!</code> always looks kinda funny.
+Our parser can then be built like this:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/mod.rs
+
+pub struct Parser&lt;'input, I&gt;
+where
+    I: Iterator&lt;Item = Token&gt;,
+{
+    input:  &amp;'input str,
+    tokens: Peekable&lt;I&gt;,
+}
+
+impl&lt;'input&gt; Parser&lt;'input, TokenIter&lt;'input&gt;&gt; {
+    pub fn new(input: &amp;'input str) -&gt; Parser&lt;'input, TokenIter&lt;'input&gt;&gt; {
+        Parser {
+            input,
+            tokens: TokenIter::new(input).peekable(),
+        }
+    }
+}
+</code></pre>
+<p>The downside of the &quot;lexer as iterator&quot; approach is shining through a bit here, since we now have to carry around the <code>'input</code> lifetime and the <code>where</code> bound (and also we had to make <code>TokenIter</code> in the first place).
+However, we'll mostly be able to forget about it for the actual parsing methods.</p>
+<p><code>Peekable</code> is an iterator adapter from the standard library, which fortunately can be named more easily than <code>Filter</code>.
+It wraps an iterator and allows us to <code>peek()</code> inside.
+This lets us look ahead one token to see what's coming, without removing the token from the iterator.
+We will use this <em>a lot</em>.</p>
+<p>Let's start with the basic methods of our parser:</p>
+<pre><code class="language-rust" data-lang="rust">
+impl&lt;'input, I&gt; Parser&lt;'input, I&gt;
+where
+    I: Iterator&lt;Item = Token&gt;,
+{
+    /// Get the source text of a token.
+    pub fn text(&amp;self, token: Token) -&gt; &amp;'input str {
+        token.text(&amp;self.input)
+    }
+
+    /// Look-ahead one token and see what kind of token it is.
+    pub(crate) fn peek(&amp;mut self) -&gt; TokenKind {
+        self.tokens.peek().map(|token| token.kind).unwrap_or(T![EOF])
+    }
+
+    /// Check if the next token is some `kind` of token.
+    pub(crate) fn at(&amp;mut self, kind: TokenKind) -&gt; bool {
+        self.peek() == kind
+    }
+
+    /// Get the next token.
+    pub(crate) fn next(&amp;mut self) -&gt; Option&lt;Token&gt; {
+        self.tokens.next()
+    }
+
+    /// Move forward one token in the input and check 
+    /// that we pass the kind of token we expect.
+    pub(crate) fn consume(&amp;mut self, expected: TokenKind) {
+        let token = self.next().expect(&amp;format!(
+            &quot;Expected to consume `{}`, but there was no next token&quot;,
+            expected
+        ));
+        assert_eq!(
+            token.kind, expected,
+            &quot;Expected to consume `{}`, but found `{}`&quot;,
+            expected, token.kind
+        );
+    }
+}
+</code></pre>
+<p>To start building our parse tree, the first step will be expressions.
+They'll end up occupying quite a bit of space, so they also go in their own module:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/expressions.rs
+
+impl&lt;'input, I&gt; Parser&lt;'input, I&gt;
+where
+    I: Iterator&lt;Item = Token&gt;,
+{
+    pub fn parse_expression(&amp;mut self) -&gt; ast::Expr {
+        match self.peek() {
+            _ =&gt; todo!()   
+        }
+    }
+}
+</code></pre>
+<p>As you can see, we'll be using <code>peek()</code> to figure out what expression is coming our way.
+We start with the most basic expression of them all: literals</p>
+<pre><code class="language-rust" data-lang="rust">lit @ T![int] | lit @ T![float] | lit @ T![string] =&gt; {
+    let literal_text = {
+        // the calls on `self` need to be split, because `next` takes `&amp;mut self`
+        // if `peek` is not `T![EOF]`, then there must be a next token
+        let literal_token = self.next().unwrap();
+        self.text(literal_token)
+    };
+    let lit = match lit {
+        T![int] =&gt; ast::Lit::Int(
+            literal_text
+                .parse()
+                .expect(&amp;format!(
+                    &quot;invalid integer literal: `{}`&quot;, 
+                    literal_text)
+                ),
+        ),
+        T![float] =&gt; ast::Lit::Float(
+            literal_text
+                .parse()
+                .expect(&amp;format!(
+                    &quot;invalid floating point literal: `{}`&quot;, 
+                    literal_text)
+                ),
+        ),
+        T![string] =&gt; ast::Lit::Str(
+            // trim the quotation marks
+            literal_text[1..(literal_text.len() - 1)].to_string()
+        ),
+        _ =&gt; unreachable!(),
+    };
+    ast::Expr::Literal(lit)
+}
+</code></pre>
+<p>I use two <code>match</code>es here so I can share the code for actions we have to take for all literals, which is resolving their text and creating an <code>ast::Expr::Literal</code> expression for them.
+The <code>lit @ T![int]</code> syntax is something that you may not have come across before.
+It gives a name to the kind that is matched, so that I can use it again in the second match.
+The result is equivalent to calling <code>let lit = self.peek()</code> again at the start of the outer match.</p>
+<p>In the inner <code>match</code>, we create the correct <code>ast::Lit</code> literal types depending on the type of the token.
+It does feel a bit like cheating to use a function called <code>parse()</code> to implement our parser, but it's what the standard library gives us and I'm for sure not gonna write string-to-number conversion routines by hand for this post.
+Even if I wanted to, other people have already done that work for me - for your implementation, you might also want to have look at <a href="https://crates.io/crates/lexical"><code>lexical</code></a> or even <a href="https://crates.io/crates/lexical-core"><code>lexical_core</code></a>.</p>
+<p>Next on the list are identifiers, which are interesting because they might just be a reference to a variable <code>bar</code>, but they might also be the start of a call to the function <code>bar(x, 2)</code>.
+Our friend <code>peek()</code> (or, in this case, <code>at()</code>) will help us solve this dilemma again:</p>
+<pre><code class="language-rust" data-lang="rust">T![ident] =&gt; {
+    let name = {
+        let ident_token = self.next().unwrap();
+        self.text(ident_token).to_string() // &lt;- now we need a copy
+    };
+    if !self.at(T!['(']) {
+        // plain identifier
+        ast::Expr::Ident(name)
+    } else {
+        //  function call
+        let mut args = Vec::new();
+        self.consume(T!['(']);
+        while !self.at(T![')']) {
+            let arg = self.parse_expression();
+            args.push(arg);
+            if self.at(T![,]) {
+                self.consume(T![,]);
+            }
+        }
+        self.consume(T![')']);
+        ast::Expr::FnCall { fn_name: name, args }
+    }
+}
+</code></pre>
+<p>If the token immediately after the identifier is an opening parenthesis, the expression becomes a function call.
+Otherwise, it stays an sole identifier.
+Remember that we filtered out any whitespace so the parenthesis will actually be the token right after the ident.</p>
+<p>For the calls we loop for as long as there are arguments (until the parentheses get closed) and parse the argument expressions <em>recursively</em>.
+This is what allows us to write <code>my_function(x + 4 * y, log(2*z))</code>, because the recursion will be able to parse any, full expression again.
+In between the arguments we expect commas and at the end we skip over the closing paren and make an <code>ast::Expr::FnCall</code> node for the input.</p>
+<p>Grouped expressions <code>(expr)</code> and prefix operators are fairly straightforward, because they also mostly call <code>parse_expression</code> recursively.
+What is interesting about grouped expressions is that they will not need an extra type of node.
+We only use the parentheses as boundaries of the expressions while parsing, but then the grouped expression <em>becomes</em> the node for whatever is inside the parens:</p>
+<pre><code class="language-rust" data-lang="rust">T!['('] =&gt; {
+    // There is no AST node for grouped expressions.
+    // Parentheses just influence the tree structure.
+    self.consume(T!['(']);
+    let expr = self.parse_expression();
+    self.consume(T![')']);
+    expr
+}
+op @ T![+] | op @ T![-] | op @ T![!] =&gt; {
+    self.consume(op);
+    let expr = self.parse_expression();
+    ast::Expr::PrefixOp {
+        op,
+        expr: Box::new(expr),
+    }
+}
+</code></pre>
+<p>Full code of <code>parse_expression</code> so far:</p>
+<pre><code class="language-rust" data-lang="rust">pub fn parse_expression(&amp;mut self) -&gt; ast::Expr {
+    match self.peek() {
+        lit @ T![int] | lit @ T![float] | lit @ T![string] =&gt; {
+            let literal_text = {
+                // if `peek` is not `T![EOF]`, then there must be a next token
+                let literal_token = self.next().unwrap();
+                self.text(literal_token)
+            };
+            let lit = match lit {
+                T![int] =&gt; ast::Lit::Int(
+                    literal_text
+                        .parse()
+                        .expect(&amp;format!(
+                            &quot;invalid integer literal: `{}`&quot;, 
+                            literal_text)
+                        ),
+                ),
+                T![float] =&gt; ast::Lit::Float(
+                    literal_text
+                        .parse()
+                        .expect(&amp;format!(
+                            &quot;invalid floating point literal: `{}`&quot;, 
+                            literal_text)
+                        ),
+                ),
+                T![string] =&gt; ast::Lit::Str(
+                    literal_text[1..(literal_text.len() - 1)].to_string()
+                ),
+                _ =&gt; unreachable!(),
+            };
+            ast::Expr::Literal(lit)
+        }
+        T![ident] =&gt; {
+            let name = {
+                let ident_token = self.next().unwrap();
+                self.text(ident_token).to_string()
+            };
+            if !self.at(T!['(']) {
+                // plain identifier
+                ast::Expr::Ident(name)
+            } else {
+                //  function call
+                let mut args = Vec::new();
+                self.consume(T!['(']);
+                while !self.at(T![')']) {
+                    let arg = self.parse_expression();
+                    args.push(arg);
+                    if self.at(T![,]) {
+                        self.consume(T![,]);
+                    }
+                }
+                self.consume(T![')']);
+                ast::Expr::FnCall { fn_name: name, args }
+            }
+        }
+        T!['('] =&gt; {
+            // There is no AST node for grouped expressions.
+            // Parentheses just influence the tree structure.
+            self.consume(T!['(']);
+            let expr = self.parse_expression();
+            self.consume(T![')']);
+            expr
+        }
+        op @ T![+] | op @ T![-] | op @ T![!] =&gt; {
+            self.consume(op);
+            let expr = self.parse_expression();
+            ast::Expr::PrefixOp {
+                op,
+                expr: Box::new(expr),
+            }
+        }
+        kind =&gt; {
+            panic!(&quot;Unknown start of expression: `{}`&quot;, kind);
+        }
+    }
+}
+</code></pre>
+<p>What we have now is enough to write our first test for our new parser:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn parse_expression() {
+    fn parse(input: &amp;str) -&gt; ast::Expr {
+        let mut parser = Parser::new(input);
+        parser.parse_expression()
+    }
+
+    // Weird spaces are to test that whitespace gets filtered out
+    let expr = parse(&quot;42&quot;);
+    assert_eq!(expr, ast::Expr::Literal(ast::Lit::Int(42)));
+    let expr = parse(&quot;  2.7768&quot;);
+    assert_eq!(expr, ast::Expr::Literal(ast::Lit::Float(2.7768)));
+    let expr = parse(r#&quot;&quot;I am a String!&quot;&quot;#);
+    assert_eq!(expr, ast::Expr::Literal(
+        ast::Lit::Str(&quot;I am a String!&quot;.to_string())
+    ));
+    let expr = parse(&quot;foo&quot;);
+    assert_eq!(expr, ast::Expr::Ident(&quot;foo&quot;.to_string()));
+    let expr = parse(&quot;bar (  x, 2)&quot;);
+    assert_eq!(
+        expr,
+        ast::Expr::FnCall {
+            fn_name: &quot;bar&quot;.to_string(),
+            args:    vec![
+                ast::Expr::Ident(&quot;x&quot;.to_string()), 
+                ast::Expr::Literal(ast::Lit::Int(2)),
+            ],
+        }
+    );
+    let expr = parse(&quot;!  is_visible&quot;);
+    assert_eq!(
+        expr,
+        ast::Expr::PrefixOp {
+            op:   T![!],
+            expr: Box::new(ast::Expr::Ident(&quot;is_visible&quot;.to_string())),
+        }
+    );
+    let expr = parse(&quot;(-13)&quot;);
+    assert_eq!(
+        expr,
+        ast::Expr::PrefixOp {
+            op:   T![-],
+            expr: Box::new(ast::Expr::Literal(ast::Lit::Int(13))),
+        }
+    );
+}
+</code></pre>
+<h4 id="binary-operators"><a class="zola-anchor" href="#binary-operators" aria-label="Anchor link for: binary-operators">🔗</a>Binary Operators</h4>
+<p>I'm gonna get a bit philosophical for this one, y'all ready?
+Ahem.
+<em>What really <strong>is</strong> a binary operator?</em>
+Sure, it's an operator that goes in between to operands.
+But, from a parsing perspective, it's a token that <em>extends</em> an expression.</p>
+<p>Imagine the input <code>-x + 3 * y ^ 2</code>.
+With what we have now, we get as far as parsing <code>-x</code> as a unary operator on an identifier, because that's the biggest unit you can get without infix operators.
+Seeing that the next token is a <code>+</code> tells us that the expression we are parsing is actually longer than that, and that after the <code>+</code> there should be another expression; the right-hand side of the addition.</p>
+<p>In our first attempt at parsing binary operators, we will try to follow this view by adding an &quot;operator loop&quot; to <code>parse_expression</code>.
+The entire <code>match</code> we have built so far becomes a potential left-hand side <code>lhs</code> of a binary operator, and after we parse it we check if the following token is an operator.
+If so, we continue parsing its right-hand side and build a corresponding <code>ast::Expr::InfixOp</code> node:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/expressions.rs
+
+pub fn parse_expression(&amp;mut self) -&gt; ast::Expr {
+    let mut lhs = match self.peek() {
+        // unchanged
+    };
+    loop {
+        let op = match self.peek() {
+            op @ T![+]
+            | op @ T![-]
+            | op @ T![*]
+            | op @ T![/]
+            | op @ T![^]
+            | op @ T![==]
+            | op @ T![!=]
+            | op @ T![&amp;&amp;]
+            | op @ T![||]
+            | op @ T![&lt;]
+            | op @ T![&lt;=]
+            | op @ T![&gt;]
+            | op @ T![&gt;=]
+            | op @ T![!] =&gt; op,
+            T![EOF] =&gt; break,
+            T![')'] | T!['}'] | T![,] | T![;] =&gt; break,
+            kind =&gt; panic!(&quot;Unknown operator: `{}`&quot;, kind),
+        };
+
+        self.consume(op);
+        let rhs = self.parse_expression();
+        lhs = ast::Expr::InfixOp {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        };
+    }
+
+    lhs
+}
+</code></pre>
+<p>If we add a small test, we see that we can now parse longer, combined expressions.
+To tests, we'll implement <code>Display</code> for our AST such that expressions are always put in parentheses:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/ast.rs
+
+impl fmt::Display for Expr {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        match self {
+            Expr::Literal(lit) =&gt; write!(f, &quot;{}&quot;, lit),
+            Expr::Ident(name) =&gt; write!(f, &quot;{}&quot;, name),
+            Expr::FnCall { fn_name, args } =&gt; {
+                write!(f, &quot;{}(&quot;, fn_name)?;
+                for arg in args {
+                    write!(f, &quot;{},&quot;, arg)?;
+                }
+                write!(f, &quot;)&quot;)
+            }
+            Expr::PrefixOp { op, expr } =&gt; 
+                write!(f, &quot;({} {})&quot;, op, expr),
+            Expr::InfixOp { op, lhs, rhs } =&gt; 
+                write!(f, &quot;({} {} {})&quot;, lhs, op, rhs),
+            Expr::PostfixOp { op, expr } =&gt; 
+                write!(f, &quot;({} {})&quot;, expr, op),
+        }
+    }
+}
+
+impl fmt::Display for Lit {
+    fn fmt(&amp;self, f: &amp;mut fmt::Formatter&lt;'_&gt;) -&gt; fmt::Result {
+        match self {
+            Lit::Int(i) =&gt; write!(f, &quot;{}&quot;, i),
+            Lit::Float(fl) =&gt; write!(f, &quot;{}&quot;, fl),
+            Lit::Str(s) =&gt; write!(f, r#&quot;&quot;{}&quot;&quot;#, s)
+        }
+    }
+}
+</code></pre>
+<p>This test now passes:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn parse_binary_expressions() {
+    fn parse(input: &amp;str) -&gt; ast::Expr {
+        let mut parser = Parser::new(input);
+        parser.parse_expression()
+    }
+
+    let expr = parse(&quot;4 + 2 * 3&quot;);
+    assert_eq!(expr.to_string(), &quot;(4 + (2 * 3))&quot;);
+}
+</code></pre>
+<p>However, if we add some more expressions, we'll see that not all of them get parsed as we would expect to following our intuitions about maths:</p>
+<pre><code class="language-rust" data-lang="rust">#[test]
+fn parse_binary_expressions() {
+    fn parse(input: &amp;str) -&gt; ast::Expr {
+        let mut parser = Parser::new(input);
+        parser.parse_expression()
+    }
+
+    let expr = parse(&quot;4 + 2 * 3&quot;);
+    assert_eq!(expr.to_string(), &quot;(4 + (2 * 3))&quot;); // passes
+
+    let expr = parse(&quot;4 * 2 + 3&quot;);
+    assert_eq!(expr.to_string(), &quot;((4 * 2) + 3)&quot;); // fails
+
+    let expr = parse(&quot;4 - 2 - 3&quot;);
+    assert_eq!(expr.to_string(), &quot;((4 - 2) - 3)&quot;); // fails
+
+    let expr = parse(&quot;4 ^ 2 ^ 3&quot;);
+    assert_eq!(expr.to_string(), &quot;(4 ^ (2 ^ 3))&quot;); // passes
+}
+</code></pre>
+<p>Currently, we're extending the expression recursively unconditionally on seeing any operator.
+Because the recursion happens after the operator, to parse the right-hand side, all our binary expressions are right-associative and ignore operator precedence rules like <code>*</code> being evaluated before <code>+</code>.
+That said, this isn't all that surprising, giving that <code>parse_expression</code> currently has no way of knowing an operator's precedence.
+Let's fix that:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/expressions.rs
+
+trait Operator {
+    /// Prefix operators bind their operand to the right.
+    fn prefix_binding_power(&amp;self) -&gt; ((), u8);
+
+    /// Infix operators bind two operands, lhs and rhs.
+    fn infix_binding_power(&amp;self) -&gt; Option&lt;(u8, u8)&gt;;
+
+    /// Postfix operators bind their operand to the left.
+    fn postfix_binding_power(&amp;self) -&gt; Option&lt;(u8, ())&gt;;
+}
+
+impl Operator for TokenKind {
+    fn prefix_binding_power(&amp;self) -&gt; ((), u8) {
+        match self {
+            T![+] | T![-] | T![!] =&gt; ((), 51),
+            // Prefixes are the only operators we have already seen
+            // when we call this, so we know the token must be
+            // one of the above
+            _ =&gt; unreachable!(&quot;Not a prefix operator: {:?}&quot;, self),
+        }
+    }
+
+    fn infix_binding_power(&amp;self) -&gt; Option&lt;(u8, u8)&gt; {
+        let result = match self {
+            T![||] =&gt; (1, 2),
+            T![&amp;&amp;] =&gt; (3, 4),
+            T![==] | T![!=] =&gt; (5, 6),
+            T![&lt;] | T![&gt;] | T![&lt;=] | T![&gt;=] =&gt; (7, 8),
+            T![+] | T![-] =&gt; (9, 10),
+            T![*] | T![/] =&gt; (11, 12),
+            T![^] =&gt; (22, 21), // &lt;- This binds stronger to the left!
+            _ =&gt; return None,
+        };
+        Some(result)
+    }
+
+    fn postfix_binding_power(&amp;self) -&gt; Option&lt;(u8, ())&gt; {
+        let result = match self {
+            T![!] =&gt; (101, ()),
+            _ =&gt; return None,
+        };
+        Some(result)
+    }
+}
+</code></pre>
+<p>For all operators, we define how tightly they bind to the left and to the right.
+If the operator is a pre- or postfix operator, one of the directions is <code>()</code>.
+The general idea is that the higher the binding power of an operator in some direction, the more it will try to take the operand on that side for itself and take it a way from other operators.
+For example, in</p>
+<pre><code class="language-rust" data-lang="rust">    4  *   2   +  3
+//   11 12    9 10
+</code></pre>
+<p>the binding power of <code>12</code> that <code>*</code> has to the right wins against the lower <code>9</code> that <code>+</code> has to the left, so the <code>2</code> gets associated with <code>*</code> and we get <code>(4 * 2) + 3</code>.
+Most of the operators bind more tightly to the right than to the left.
+This way we get</p>
+<pre><code class="language-rust" data-lang="rust">    4  -   2   -  3
+//    9 10    9 10
+</code></pre>
+<p>the right way round as <code>(4 - 2) - 3</code> as the <code>10</code> that <code>-</code> has to the right wins against the <code>9</code> it has to the left.
+For right-associative operators like <code>^</code>, we swap the higher binding power to the left:</p>
+<pre><code class="language-rust" data-lang="rust">    4  ^   2   ^  3
+//   22 21   22 21
+</code></pre>
+<p>is grouped as <code>4 ^ (2 ^ 3)</code> as <code>22</code> wins against <code>21</code>.</p>
+<p>How can we implement this into our <code>parse_expression</code>?
+We'll need to know the right-sided binding power of the operator that triggered a recursion which parses a new right-hand side.
+When we enter the operator loop, we check not only if the next token is an operator, but also its left-sided binding power.
+Only if this binding power is at least as high as the current right-sided one do we recurse again, which associates the current expression with the <em>new, following</em> operator.
+Otherwise we stop and return, so the operator with the higher right-sided binding power gets the expression.</p>
+<p>This is hard to wrap your head around the first time. Once you get it, it's great and you will never want to do anything else again to handle expression, but it needs to click first. 
+<a href="https://matklad.github.io/2020/04/13/simple-but-powerful-pratt-parsing.html">Simple but Powerful Pratt Parsing</a> by <code>matklad</code>, the man behind <code>rust-analyzer</code>, is a very good article on the topic if you'd like to get explained this again, in a different way.
+In code, it looks like this:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/expressions.rs
+
+pub fn parse_expression(&amp;mut self, binding_power: u8) -&gt; ast::Expr {
+    let mut lhs = match self.peek() {
+        lit @ T![int] | lit @ T![float] | lit @ T![string] =&gt; {
+            // unchanged
+        }
+        T![ident] =&gt; {
+            let name = {
+                let ident_token = self.next().unwrap();
+                self.text(ident_token).to_string()
+            };
+            if !self.at(T!['(']) {
+                // plain identifier
+                ast::Expr::Ident(name)
+            } else {
+                //  function call
+                let mut args = Vec::new();
+                self.consume(T!['(']);
+                while !self.at(T![')']) {
+                    let arg = self.parse_expression(0); // &lt;- NEW!
+                    args.push(arg);
+                    if self.at(T![,]) {
+                        self.consume(T![,]);
+                    }
+                }
+                self.consume(T![')']);
+                ast::Expr::FnCall { fn_name: name, args }
+            }
+        }
+        T!['('] =&gt; {
+            // There is no AST node for grouped expressions.
+            // Parentheses just influence the tree structure.
+            self.consume(T!['(']);
+            let expr = self.parse_expression(0); // &lt;- NEW!
+            self.consume(T![')']);
+            expr
+        }
+        op @ T![+] | op @ T![-] | op @ T![!] =&gt; {
+            self.consume(op);
+            let ((), right_binding_power) = op.prefix_binding_power(); 
+            let expr = self.parse_expression(right_binding_power); // &lt;- NEW!
+            ast::Expr::PrefixOp {
+                op,
+                expr: Box::new(expr),
+            }
+        }
+        kind =&gt; {
+            panic!(&quot;Unknown start of expression: `{}`&quot;, kind);
+        }
+    };
+    loop {
+        let op = // unchanged;
+
+        if let Some((left_binding_power, right_binding_power)) = 
+            op.infix_binding_power() { // &lt;- NEW!
+
+            if left_binding_power &lt; binding_power {
+                // previous operator has higher binding power than new one
+                // --&gt; end of expression
+                break; 
+            }
+
+            self.consume(op);
+            let rhs = self.parse_expression(right_binding_power);
+            lhs = ast::Expr::InfixOp {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+            // parsed an operator --&gt; go round the loop again
+            continue; 
+        }
+        break; // Not an operator --&gt; end of expression
+    }
+
+    lhs
+}
+</code></pre>
+<p>Recursive calls for both prefix and infix operators get passed the right-sided binding power of the current operator.
+The important stopping point is the <code>if left_binding_power &lt; binding_power { break; }</code> inside the operator loop.
+If <code>op</code>'s left-sided binding power does not at least match the required binding power of the current invocation, it does not get parsed in the loop.
+It will instead get parsed some number of returns up the recursion stack, by an operator loop with sufficiently high binding power.
+Function call arguments and grouped expressions in parentheses reset the required binding power to <code>0</code>, since they take precedence before any chain of operators.</p>
+<p>For the interface of our parser, we add a small wrapper that will also call <code>parse_expression</code> with an initial binding power of <code>0</code>:</p>
+<pre><code class="language-rust" data-lang="rust">pub fn expression(&amp;mut self) -&gt; ast::Expr {
+    self.parse_expression(0)
+}
+</code></pre>
+<p>We need to swap that in in our expression parsing tests:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs, expression tests
+
+fn parse(input: &amp;str) -&gt; ast::Expr {
+    let mut parser = Parser::new(input);
+    parser.expression()
+}
+</code></pre>
+<p>The test that previously failed should now pass.
+We'll add a few more complex expressions and test that they are also parsed correctly:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn parse_binary_expressions() {
+    // ...unchanged
+
+    let expr = parse(
+        r#&quot;45.7 + 3 + 5 * 4^8^9 / 6 &gt; 4 &amp;&amp; test - 7 / 4 == &quot;Hallo&quot;&quot;#
+    );
+    assert_eq!(
+        expr.to_string(),
+        r#&quot;((((45.7 + 3) + ((5 * (4 ^ (8 ^ 9))) / 6)) &gt; 4) &amp;&amp; ((test - (7 / 4)) == &quot;Hallo&quot;))&quot;#
+    );
+
+    let expr = parse(&quot;2.0 / ((3.0 + 4.0) * (5.0 - 6.0)) * 7.0&quot;);
+    assert_eq!(expr.to_string(), &quot;((2 / ((3 + 4) * (5 - 6))) * 7)&quot;);
+
+    let expr = parse(&quot;min ( test + 4 , sin(2*PI ))&quot;);
+    assert_eq!(expr.to_string(), &quot;min((test + 4),sin((2 * PI),),)&quot;);
+}
+</code></pre>
+<p>Postfix operators are now an easy addition:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/expresions.rs
+
+pub fn parse_expression(&amp;mut self, binding_power: u8) -&gt; ast::Expr {
+    let mut lhs = match self.peek() {
+        // unchanged
+    };
+    loop {
+        let op = // unchanged;
+
+        // NEW!
+        if let Some((left_binding_power, ())) = op.postfix_binding_power() { 
+            if left_binding_power &lt; binding_power {
+                // previous operator has higher binding power than new one 
+                // --&gt; end of expression
+                break;
+            }
+
+            self.consume(op);
+            // no recursive call here, because we have already
+            // parsed our operand `lhs`
+            lhs = ast::Expr::PostfixOp {
+                op,
+                expr: Box::new(lhs),
+            };
+            // parsed an operator --&gt; go round the loop again
+            continue;
+        }
+
+        if let Some((left_binding_power, right_binding_power)) = 
+            op.infix_binding_power() {
+            // unchanged
+        }
+
+        break; // Not an operator --&gt; end of expression
+    }
+
+    lhs
+}
+</code></pre>
+<p>And to check it works:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn parse_postfix_op() {
+    fn parse(input: &amp;str) -&gt; ast::Expr {
+        let mut parser = Parser::new(input);
+        parser.expression()
+    }
+
+    let expr = parse(&quot;4 + -2! * 3&quot;);
+    assert_eq!(expr.to_string(), &quot;(4 + ((- (2 !)) * 3))&quot;);
+}
+</code></pre>
+<p>This will be the end of expressions for us.
+If you want, try adding additional operators on your own.
+Some language constructs that one might not necessarily think of as operators fit very cleanly into our framework.
+For example, try adding <code>.</code> as an operator to model field accesses like <code>foo.bar</code>.
+For a greater challenge, array indexing can be handled as a combination of postfix operator <code>[</code> and grouped expressions.
+There's all kinds of expressions left for you to do, but we now have to move on to...</p>
+<h4 id="statements"><a class="zola-anchor" href="#statements" aria-label="Anchor link for: statements">🔗</a>Statements</h4>
+<p>As a reward for our hard work on expressions, we are now allowed to parse anything that <em>indludes</em> an expression.
+The next level up from expressions are <em>statements</em>, of which we will consider variable definitions with <code>let</code> and re-assignments without <code>let</code>, as well as <code>if</code> statements (we'll also need a representation of explicit <code>{}</code> scopes):</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/ast.rs
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Stmt {
+    Let {
+        var_name: String,
+        value:    Box&lt;Expr&gt;,
+    },
+    Assignment {
+        var_name: String,
+        value:    Box&lt;Expr&gt;,
+    },
+    IfStmt {
+        condition: Box&lt;Expr&gt;,
+        body:      Vec&lt;Stmt&gt;,
+        else_stmt: Option&lt;Box&lt;Stmt&gt;&gt;,
+    },
+    Block {
+        stmts: Vec&lt;Stmt&gt;,
+    },
+}
+</code></pre>
+<p>We'll make a new module called <code>hierarchy</code> for statements and beyond and start the same way as for expressions:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/hierarchy.rs
+
+impl&lt;'input, I&gt; Parser&lt;'input, I&gt;
+where
+    I: Iterator&lt;Item = Token&gt;,
+{
+    pub fn statement(&amp;mut self) -&gt; ast::Stmt {
+        match self.peek() {
+            _ =&gt; todo!(),
+        }
+    }
+}
+</code></pre>
+<p>The declaration and the <code>let</code> differ only by the <code>let</code> keyword:</p>
+<pre><code class="language-rust" data-lang="rust">T![let] =&gt; {
+    self.consume(T![let]);
+    let ident = self.next().expect(&quot;Expected identifier after `let`&quot;);
+    assert_eq!(
+        ident.kind,
+        T![ident],
+        &quot;Expected identifier after `let`, but found `{}`&quot;,
+        ident.kind
+    );
+    let name = self.text(ident).to_string();
+    self.consume(T![=]);
+    let value = self.expression();
+    self.consume(T![;]);
+    ast::Stmt::Let {
+        var_name: name,
+        value:    Box::new(value),
+    }
+}
+T![ident] =&gt; {
+    let ident = self.next().unwrap();
+    let name = self.text(ident).to_string();
+    self.consume(T![=]);
+    let value = self.expression();
+    self.consume(T![;]);
+    ast::Stmt::Assignment {
+        var_name: name,
+        value:    Box::new(value),
+    }
+}
+</code></pre>
+<p>Note how we now just call <code>self.expression()</code> to parse the value assigned to the variable.
+It will do all the expression parsing work for us and return us a nice <code>ast::Expr</code> to use in our <code>ast::Stmt</code>.
+The <code>if</code> case is a bit more involved, because we need to handle the condition, the statements inside the <code>if</code> and also possible a <code>else</code>.
+We can make our lives a bit easier by re-using the block scope statement for the body:</p>
+<pre><code class="language-rust" data-lang="rust">T![if] =&gt; {
+    self.consume(T![if]);
+    self.consume(T!['(']);
+    let condition = self.expression();
+    self.consume(T![')']);
+
+    assert!(self.at(T!['{']), &quot;Expected a block after `if` statement&quot;);
+    let body = self.statement();
+    let body = match body {
+        ast::Stmt::Block { stmts } =&gt; stmts,
+        _ =&gt; unreachable!(),
+    };
+
+    let else_stmt = if self.at(T![else]) {
+        self.consume(T![else]);
+        assert!(
+            self.at(T![if]) || self.at(T!['{']),
+            &quot;Expected a block or an `if` after `else` statement&quot;
+        );
+        Some(Box::new(self.statement()))
+    } else {
+        None
+    };
+
+    ast::Stmt::IfStmt {
+        condition: Box::new(condition),
+        body,
+        else_stmt,
+    }
+}
+T!['{'] =&gt; {
+    self.consume(T!['{']);
+    let mut stmts = Vec::new();
+    while !self.at(T!['}']) {
+        let stmt = self.statement();
+        stmts.push(stmt);
+    }
+    self.consume(T!['}']);
+    ast::Stmt::Block { stmts }
+}
+</code></pre>
+<p>The statement test will be our longest test so far:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn parse_statements() {
+    fn parse(input: &amp;str) -&gt; ast::Stmt {
+        let mut parser = Parser::new(input);
+        parser.statement()
+    }
+
+    let stmt = parse(
+        unindent(
+            r#&quot;
+        {
+            let x = 7 + sin(y);
+            {
+                x = 3;
+                if (bar &lt; 3) {
+                    x = x + 1;
+                    y = 3 * x;
+                } else if (bar &lt; 2) {
+                    let i = 2!;
+                    x = x + i;
+                } else {
+                    x = 1;
+                }
+            }
+        }
+    &quot;#,
+        )
+        .as_str(),
+    );
+
+    let stmts = match stmt {
+        ast::Stmt::Block { stmts } =&gt; stmts,
+        _ =&gt; unreachable!(),
+    };
+    assert_eq!(stmts.len(), 2);
+
+    let let_stmt = &amp;stmts[0];
+    match let_stmt {
+        ast::Stmt::Let { var_name, .. } =&gt; assert_eq!(var_name, &quot;x&quot;),
+        _ =&gt; unreachable!(),
+    }
+
+    let stmts = match &amp;stmts[1] {
+        ast::Stmt::Block { stmts } =&gt; stmts,
+        _ =&gt; unreachable!(),
+    };
+    assert_eq!(stmts.len(), 2);
+
+    let assignment_stmt = &amp;stmts[0];
+    match assignment_stmt {
+        ast::Stmt::Assignment { var_name, .. } =&gt; assert_eq!(var_name, &quot;x&quot;),
+        _ =&gt; unreachable!(),
+    }
+
+    let if_stmt = &amp;stmts[1];
+    match if_stmt {
+        ast::Stmt::IfStmt {
+            condition,
+            body,
+            else_stmt,
+        } =&gt; {
+            assert!(matches!(
+                &amp;**condition,
+                ast::Expr::InfixOp {
+                    op:  T![&lt;],
+                    lhs: _lhs,
+                    rhs: _rhs,
+                }
+            ));
+            assert_eq!(body.len(), 2);
+            let x_assignment = &amp;body[0];
+            match x_assignment {
+                ast::Stmt::Assignment { var_name, .. } =&gt; 
+                    assert_eq!(var_name, &quot;x&quot;),
+                _ =&gt; unreachable!(),
+            }
+            let y_assignment = &amp;body[1];
+            match y_assignment {
+                ast::Stmt::Assignment { var_name, .. } =&gt; 
+                    assert_eq!(var_name, &quot;y&quot;),
+                _ =&gt; unreachable!(),
+            }
+
+            let else_stmt = match else_stmt {
+                Some(stmt) =&gt; &amp;**stmt,
+                None =&gt; unreachable!(),
+            };
+
+            match else_stmt {
+                ast::Stmt::IfStmt {
+                    condition,
+                    body,
+                    else_stmt,
+                } =&gt; {
+                    assert!(matches!(
+                        &amp;**condition,
+                        ast::Expr::InfixOp {
+                            op:  T![&lt;],
+                            lhs: _lhs,
+                            rhs: _rhs,
+                        }
+                    ));
+                    assert_eq!(body.len(), 2);
+                    let let_i = &amp;body[0];
+                    match let_i {
+                        ast::Stmt::Let { var_name, .. } =&gt; 
+                            assert_eq!(var_name, &quot;i&quot;),
+                        _ =&gt; unreachable!(),
+                    }
+                    let x_assignment = &amp;body[1];
+                    match x_assignment {
+                        ast::Stmt::Assignment { var_name, .. } =&gt; 
+                            assert_eq!(var_name, &quot;x&quot;),
+                        _ =&gt; unreachable!(),
+                    }
+
+                    let else_stmt = match else_stmt {
+                        Some(stmt) =&gt; &amp;**stmt,
+                        None =&gt; unreachable!(),
+                    };
+
+                    let stmts = match else_stmt {
+                        ast::Stmt::Block { stmts } =&gt; stmts,
+                        _ =&gt; unreachable!(),
+                    };
+                    assert_eq!(stmts.len(), 1);
+
+                    let x_assignment = &amp;stmts[0];
+                    match x_assignment {
+                        ast::Stmt::Assignment { var_name, .. } =&gt; 
+                            assert_eq!(var_name, &quot;x&quot;),
+                        _ =&gt; unreachable!(),
+                    }
+                }
+                _ =&gt; unreachable!(),
+            };
+        }
+        _ =&gt; unreachable!(),
+    }
+}
+</code></pre>
+<h4 id="items"><a class="zola-anchor" href="#items" aria-label="Anchor link for: items">🔗</a>Items</h4>
+<p>Let's move up another level to items containing statements.
+We'll do struct and function definitions, for which we'll also need a notion of what a type looks like in our language.
+As before, our reward for doing statements is that we're now allowed to use <code>self.statement()</code> to parse the function body.
+Time to <a href="https://www.youtube.com/watch?v=_JmBsOywqzE">play that same song again!</a></p>
+<pre><code class="language-rust" data-lang="rust">// In parser/ast.rs
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Item {
+    Struct {
+        name:    Type,
+        members: Vec&lt;(String, Type)&gt;,
+    },
+    Function {
+        name:       String,
+        parameters: Vec&lt;(String, Type)&gt;,
+        body:       Vec&lt;Stmt&gt;,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Type {
+    pub name:     String,
+    pub generics: Vec&lt;Type&gt;,
+}
+</code></pre>
+<p>As you can see, a <code>Type</code> is really just an identifier plus a list of generic parameters.
+We use that for both function parameters and struct members, and also for the struct definition itself, to allow defining structs like <code>Foo&lt;T, U&gt;</code>.
+Parsing types uses a recursive loop over the generic parameters (which are themselves types, like in <code>Bar&lt;Baz&lt;T&gt;&gt;</code>):</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/hierarchy.rs
+
+pub fn type_(&amp;mut self) -&gt; ast::Type {
+    let ident = self.next()
+        .expect(&quot;Tried to parse type, but there were no more tokens&quot;);
+    assert_eq!(
+        ident.kind,
+        T![ident],
+        &quot;Expected identifier at start of type, but found `{}`&quot;,
+        ident.kind
+    );
+    let name = self.text(ident).to_string();
+
+    let mut generics = Vec::new();
+
+    if self.at(T![&lt;]) {
+        self.consume(T![&lt;]);
+        while !self.at(T![&gt;]) {
+            // Generic parameters are also types
+            let generic = self.type_();
+            generics.push(generic);
+            if self.at(T![,]) {
+                self.consume(T![,]);
+            }
+        }
+        self.consume(T![&gt;]);
+    }
+
+    ast::Type { name, generics }
+}
+</code></pre>
+<p>We'll implement struct definitions first.
+They are very similar - instead of generic parameters we loop over members, which are identifiers followed by <code>:</code> and their type:</p>
+<pre><code class="language-rust" data-lang="rust">pub fn item(&amp;mut self) -&gt; ast::Item {
+    match self.peek() {
+        T![fn] =&gt; todo!(),
+        T![struct] =&gt; {
+            self.consume(T![struct]);
+            let mut members = Vec::new();
+            let name = self.type_();
+            self.consume(T!['{']);
+            while !self.at(T!['}']) {
+                let member_ident = self
+                    .next()
+                    .expect(&quot;Tried to parse struct member, 
+                        but there were no more tokens&quot;);
+                assert_eq!(
+                    member_ident.kind,
+                    T![ident],
+                    &quot;Expected identifier as struct member, but found `{}`&quot;,
+                    member_ident.kind
+                );
+                let member_name = self.text(member_ident).to_string();
+                self.consume(T![:]);
+                let member_type = self.type_();
+                members.push((member_name, member_type));
+                if self.at(T![,]) {
+                    self.consume(T![,]);
+                }
+            }
+            self.consume(T!['}']);
+            ast::Item::Struct { name, members }
+        }
+        kind =&gt; panic!(&quot;Unknown start of item: `{}`&quot;, kind),
+    }
+}
+</code></pre>
+<p>We can test types and struct definitions already:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn parse_struct() {
+    fn parse(input: &amp;str) -&gt; ast::Item {
+        let mut parser = Parser::new(input);
+        parser.item()
+    }
+
+    let item = parse(
+        unindent(
+            r#&quot;
+        struct Foo&lt;T, U&gt; {
+            x: String,
+            bar: Bar&lt;Baz&lt;T&gt;, U&gt;
+        }
+    &quot;#,
+        )
+        .as_str(),
+    );
+
+    match item {
+        ast::Item::Struct { name, members } =&gt; {
+            assert_eq!(
+                name,
+                ast::Type {
+                    name:     &quot;Foo&quot;.to_string(),
+                    generics: vec![
+                        ast::Type {
+                            name:     &quot;T&quot;.to_string(),
+                            generics: vec![],
+                        },
+                        ast::Type {
+                            name:     &quot;U&quot;.to_string(),
+                            generics: vec![],
+                        }
+                    ],
+                }
+            );
+            assert_eq!(members.len(), 2);
+            let (bar, bar_type) = &amp;members[1];
+            assert_eq!(bar, &quot;bar&quot;);
+            assert_eq!(
+                bar_type,
+                &amp;ast::Type {
+                    name:     &quot;Bar&quot;.to_string(),
+                    generics: vec![
+                        ast::Type {
+                            name:     &quot;Baz&quot;.to_string(),
+                            generics: vec![ast::Type {
+                                name:     &quot;T&quot;.to_string(),
+                                generics: vec![],
+                            }],
+                        },
+                        ast::Type {
+                            name:     &quot;U&quot;.to_string(),
+                            generics: vec![],
+                        }
+                    ],
+                }
+            );
+        }
+        _ =&gt; unreachable!(),
+    };
+}
+</code></pre>
+<p>The function case should start to look familiar to you by now; it's a loop over parameters!
+Additionally, we use the same trick as for <code>if</code> to parse the function body:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/hierarchy.rs, `Parser::item`
+
+T![fn] =&gt; {
+    self.consume(T![fn]);
+    let mut parameters = Vec::new();
+
+    let ident = self
+        .next()
+        .expect(&quot;Tried to parse function name, but there were no more tokens&quot;);
+    assert_eq!(
+        ident.kind,
+        T![ident],
+        &quot;Expected identifier as function name, but found `{}`&quot;,
+        ident.kind
+    );
+    let name = self.text(ident).to_string();
+
+    self.consume(T!['(']);
+    while !self.at(T![')']) {
+        let parameter_ident = self
+            .next()
+            .expect(&quot;Tried to parse function parameter, 
+                but there were no more tokens&quot;);
+        assert_eq!(
+            parameter_ident.kind,
+            T![ident],
+            &quot;Expected identifier as function parameter, but found `{}`&quot;,
+            parameter_ident.kind
+        );
+        let parameter_name = self.text(parameter_ident).to_string();
+        self.consume(T![:]);
+        let parameter_type = self.type_();
+        parameters.push((parameter_name, parameter_type));
+        if self.at(T![,]) {
+            self.consume(T![,]);
+        }
+    }
+    self.consume(T![')']);
+
+    assert!(self.at(T!['{']), &quot;Expected a block after function header&quot;);
+    let body = match self.statement() {
+        ast::Stmt::Block { stmts } =&gt; stmts,
+        _ =&gt; unreachable!(),
+    };
+
+    ast::Item::Function { name, parameters, body }
+}
+</code></pre>
+<p>We'll add a test for functions as well:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn parse_function() {
+    fn parse(input: &amp;str) -&gt; ast::Item {
+        let mut parser = Parser::new(input);
+        parser.item()
+    }
+
+    let item = parse(
+        unindent(
+            r#&quot;
+        fn wow_we_did_it(x: String, bar: Bar&lt;Baz&lt;T&gt;, U&gt;) {
+            let x = 7 + sin(y);
+            {
+                x = 3;
+                if (bar &lt; 3) {
+                    x = x + 1;
+                    y = 3 * x;
+                } else if (bar &lt; 2) {
+                    let i = 2!;
+                    x = x + i;
+                } else {
+                    x = 1;
+                }
+            }
+        }
+    &quot;#,
+        )
+        .as_str(),
+    );
+
+    match item {
+        ast::Item::Function { name, parameters, body } =&gt; {
+            assert_eq!(name, &quot;wow_we_did_it&quot;);
+            assert_eq!(parameters.len(), 2);
+            let (bar, bar_type) = &amp;parameters[1];
+            assert_eq!(bar, &quot;bar&quot;);
+            assert_eq!(
+                bar_type,
+                &amp;ast::Type {
+                    name:     &quot;Bar&quot;.to_string(),
+                    generics: vec![
+                        ast::Type {
+                            name:     &quot;Baz&quot;.to_string(),
+                            generics: vec![ast::Type {
+                                name:     &quot;T&quot;.to_string(),
+                                generics: vec![],
+                            }],
+                        },
+                        ast::Type {
+                            name:     &quot;U&quot;.to_string(),
+                            generics: vec![],
+                        }
+                    ],
+                }
+            );
+            assert_eq!(body.len(), 2);
+        }
+        _ =&gt; unreachable!(),
+    };
+}
+</code></pre>
+<h4 id="files"><a class="zola-anchor" href="#files" aria-label="Anchor link for: files">🔗</a>Files</h4>
+<p>We're running the victory lap now!
+We'll make a parser method to parse an entire file, as a sequence of items:</p>
+<pre><code class="language-rust" data-lang="rust">// In parser/hierarchy.rs
+
+pub fn file(&amp;mut self) -&gt; Vec&lt;ast::Item&gt; {
+    let mut items = Vec::new();
+    while !self.at(T![EOF]) {
+        let item = self.item();
+        items.push(item);
+    }
+    items
+}
+</code></pre>
+<p>And a last, glorious test:</p>
+<pre><code class="language-rust" data-lang="rust">// In tests/it.rs
+
+#[test]
+fn parse_file() {
+    fn parse(input: &amp;str) -&gt; Vec&lt;ast::Item&gt; {
+        let mut parser = Parser::new(input);
+        parser.file()
+    }
+
+    let items = parse(
+        unindent(
+            r#&quot;
+        fn wow_we_did_it(x: String, bar: Bar&lt;Baz&lt;T&gt;, U&gt;) {
+            let x = 7 + sin(y);
+            {
+                x = 3;
+                if (bar &lt; 3) {
+                    x = x + 1;
+                    y = 3 * x;
+                } else if (bar &lt; 2) {
+                    let i = 2!;
+                    x = x + i;
+                } else {
+                    x = 1;
+                }
+            }
+        }
+
+        struct Foo&lt;T, U&gt; {
+            x: String,
+            bar: Bar&lt;Baz&lt;T&gt;, U&gt;
+        }
+    &quot;#,
+        )
+        .as_str(),
+    );
+
+    let function = &amp;items[0];
+    match function {
+        ast::Item::Function { name, parameters, body } =&gt; {
+            assert_eq!(name, &quot;wow_we_did_it&quot;);
+            assert_eq!(parameters.len(), 2);
+            assert_eq!(body.len(), 2);
+        }
+        _ =&gt; unreachable!(),
+    };
+
+    let struct_ = &amp;items[1];
+    match struct_ {
+        ast::Item::Struct { name, members } =&gt; {
+            assert_eq!(
+                name,
+                &amp;ast::Type {
+                    name:     &quot;Foo&quot;.to_string(),
+                    generics: vec![
+                        ast::Type {
+                            name:     &quot;T&quot;.to_string(),
+                            generics: vec![],
+                        },
+                        ast::Type {
+                            name:     &quot;U&quot;.to_string(),
+                            generics: vec![],
+                        }
+                    ],
+                }
+            );
+            assert_eq!(members.len(), 2);
+        }
+        _ =&gt; unreachable!(),
+    };
+}
+</code></pre>
+<h2 id="a-retrospective-high-level-view-descending"><a class="zola-anchor" href="#a-retrospective-high-level-view-descending" aria-label="Anchor link for: a-retrospective-high-level-view-descending">🔗</a>A Retrospective High-Level View: Descending</h2>
+<p>We have built up parser from small components; basic building blocks with which built higher and higher.
+From individual characters we made tokens.
+We parsed these tokens into atoms of expressions, then into bigger, complex expressions, then statements, then items, then files.</p>
+<p>Now we have reached the top, and it's time to look back down and see how high we have built and what we have achieved.</p>
+<p>At the beginning of this post, I described the hierarchy of a program as files containing items containing statements and so forth.
+It was much easier for us to implement our parser the other way round, because that way we were able to use the smaller things to build the bigger things.
+But if we now follow a run of our parser, we can see it tracing the hierarchy levels from the top to the bottom.</p>
+<p>What we have built is what is called a <a href="https://en.m.wikipedia.org/wiki/Recursive_descent_parser">recursive-descent</a> parser.
+In such a parser, each <em>thing</em> in your language is implemented as its own function, which is called from all the other places in the language where that thing could be.
+You can see this in the way we call <code>statement()</code> and <code>type_()</code> from <code>item()</code>, and <code>expression()</code> from <code>statement()</code> (I deviated a bit from the strict pattern by not making individual <code>struct()</code> and <code>function_declaration()</code> functions and instead inlining them into <code>item()</code>, same with <code>statement()</code>).
+The only real time we break away from this paradigm is to parse expressions, where we use <a href="https://en.m.wikipedia.org/wiki/Operator-precedence_parser#Pratt_parsing">Pratt parsing</a> as a more tailored algorithm for expressions with precedence and associativity.</p>
+<p>Recursive-descent parsers are widely used everywhere, for both parsers generated by parser generators and hand-written parsers for production languages (including Rust).
+There are corresponding bottom-up parsing techniques, but you're less likely to see them implemented by hand.
+Going top-down is just a lot more straightforward to implement.</p>
+<h2 id="bonus-what-if-we-did-use-a-generator"><a class="zola-anchor" href="#bonus-what-if-we-did-use-a-generator" aria-label="Anchor link for: bonus-what-if-we-did-use-a-generator">🔗</a>Bonus: What if we <em>did</em> use a generator?</h2>
+<p>Before we get ahead of ourselves, I will not switch our implementation to a parser generator now.
+For one, there is no one crate that would be <em>the</em> generator to use.
+A whole bunch of parser generators exists, and if you're interested in trying one out I will once again refer you to <a href="https://github.com/Kixiron/rust-langdev#parsers">this list</a>.
+But also, any parser generator comes with a set of trade-offs from what language grammars you can have over what it outputs to whether you can use a custom lexer with it and, if so, what that lexer has to spit out.
+Parser generators can be a great way to get you started prototyping your language, but you will always get the most control with a hand-written parser, at the cost of having to implement and maintain it.
+Hopefully, this article can help with the latter.</p>
+<p>Generating a <em>lexer</em> is a different story. 
+Lexers are a lot more &quot;boring&quot;, in the sense that you are less likely to do anything special in the lexer that is particular to your language.
+An exception may be whitespace-sensitive languages like Python or Haskell, which rely on indentation as part of understanding a program written in them.
+Even for those, it is usually possible to wrap a generated lexer and post-process its tokens to get what you want.</p>
+<p>A big advantage of lexer generators is that they can optimize your token classes <em>a lot</em>.
+Instead of running all lexer rules individually for each token (which we to when we iterate over all lexer <code>Rule</code>s and call their <code>matches</code> method), a generator will compute efficient look-up structures at compile time that essentially try all rules <em>in parallel</em>, at a fraction of the cost.</p>
+<p>This can give sizeable improvements in performance.
+Why does that matter?
+That may seem like dumb question, but as many people before me have pointed out, parsing is usually only a tiny part of compiler in terms of the work it has to do.
+A compiler has many other tasks like type checking, monormorphization, optimization and code generation, all of which are probably more effort than parsing the input file.
+So indeed, the absolute parsing speed less relevant inside a compiler, though that may be different in other applications like IDE-tooling.</p>
+<p>What <em>does</em> matter to some extent is the <em>throughput</em> of your parser.
+Throughput refers to the number of bytes, or lines, that the parser can process per second.
+Assuming all files have to go through your parser, this is a limit for how fast you can continuously process input.</p>
+<p>Anyways, let's see where we stand in terms of lexing and parsing speed.
+We'll bring in the <a href="https://crates.io/crates/criterion"><code>criterion</code></a> library and register a benchmark with cargo:</p>
+<pre><code class="language-toml" data-lang="toml">[dev-dependencies]
+unindent = &quot;0.1&quot; # old
+criterion = &quot;0.3.4&quot;
+
+[[bench]]
+name = &quot;main&quot;
+harness = false
+</code></pre>
+<p>In the benchmark, we'll run our lexer on a function and a struct definition.
+This is not a guide to criterion, so I'll not explain this in too much detail.
+The important things are we need to have some input, we need to tell <code>criterion</code> how long that input is so it can calculate the throughput, and then we need to run our lexer on the input under <code>criterion</code>'s scrutiny:</p>
+<pre><code class="language-rust" data-lang="rust">// In benches/main.rs
+
+use parsing_basics::lexer::Lexer;
+use std::time::Duration;
+use unindent::unindent;
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+
+pub fn lex_function(c: &amp;mut Criterion) {
+    let input = r#&quot;
+        // tests stuff
+        fn test(var: Type, var2_: bool) {
+            let x = &quot;String content \&quot; test&quot; + 7 / 27.3e-2^4;
+            let chars = x.chars();
+            if let Some(c) = chars.next() {
+                x = x + c;
+            } else if !var2_ {
+                x = x + &quot;,&quot;;
+            }
+        }
+    &quot;#;
+    let input = unindent(input);
+    bench_lexer(c, &quot;function&quot;, input.as_str());
+}
+
+pub fn lex_struct(c: &amp;mut Criterion) {
+    let input = r#&quot;
+        struct Foo&lt;T&gt; {
+            bar: Bar&lt;T&gt;,
+        }
+    &quot;#;
+    let input = unindent(input);
+    bench_lexer(c, &quot;struct&quot;, input.as_str());
+}
+
+fn bench_lexer(c: &amp;mut Criterion, name: &amp;str, input: &amp;str) {
+    // Lexing: measured in bytes
+    let mut group = c.benchmark_group(&quot;lexer&quot;);
+    group.measurement_time(Duration::from_millis(7500));
+
+    // To measure throughput, we need to tell `criterion`
+    // how big our input is.
+    group.throughput(Throughput::Bytes(input.as_bytes().len() as u64));
+    group.bench_with_input( name, input, |b, input| {
+        b.iter_batched(
+            || Lexer::new(input),         // &lt;- Our lexer is made HERE
+            |mut lexer| lexer.tokenize(), // &lt;- and runs HERE
+            BatchSize::SmallInput,
+        )
+    });
+    group.finish();
+}
+
+criterion_group!(benches, lex_function, lex_struct);
+criterion_main!(benches);
+</code></pre>
+<p>Your mileage may vary, but on my machine I get:</p>
+<pre><code>lexer/function    time:   [9.5872 us 9.6829 us 9.7927 us]
+                  thrpt:  [23.081 MiB/s 23.342 MiB/s 23.575 MiB/s]
+
+lexer/struct      time:   [2.4278 us 2.4652 us 2.5161 us]
+                  thrpt:  [13.266 MiB/s 13.540 MiB/s 13.749 MiB/s]
+</code></pre>
+<p>This already shows use something interesting - while the smaller struct definition lexes faster in absolute time, the throughput <code>criterion</code> shows for it is lower!
+Obviously, our lexer isn't doing anything differently between the two inputs.
+But something, be it the distribution more whitespace or more unique single-character tokens or more rule-based tokens or something else, gives the struct definition a worse profile than the function definition.</p>
+<p>Let's bench the parser as well:</p>
+<pre><code class="language-rust" data-lang="rust">// In benches/main.rs
+
+pub fn parse_file(c: &amp;mut Criterion) {
+    let input = r#&quot;
+        fn wow_we_did_it(x: String, bar: Bar&lt;Baz&lt;T&gt;, U&gt;) {
+            let x = 7 + sin(y);
+            {
+                x = 3;
+                if (bar &lt; 3) {
+                    x = x + 1;
+                    y = 3 * x;
+                } else if (bar &lt; 2) {
+                    let i = 2!;
+                    x = x + i;
+                } else {
+                    x = 1;
+                }
+            }
+        }
+
+        struct Foo&lt;T, U&gt; {
+            x: String,
+            bar: Bar&lt;Baz&lt;T&gt;, U&gt;
+        }
+    &quot;#;
+    let input = unindent(input);
+    bench_parser(c, &quot;file&quot;, input.as_str());
+}
+
+fn bench_parser(c: &amp;mut Criterion, name: &amp;str, input: &amp;str) {
+    let mut group = c.benchmark_group(&quot;parser&quot;);
+    group.measurement_time(Duration::from_secs(10));
+
+    group.throughput(Throughput::Bytes(input.as_bytes().len() as u64));
+    group.bench_with_input(name, input, |b, input| {
+        b.iter_with_setup(
+            || Parser::new(input),
+            |mut parser| {
+                let _tree = parser.file();
+            },
+        )
+    });
+    group.finish();
+}
+
+criterion_group!(benches, lex_function, lex_struct, parse_file); // edited
+</code></pre>
+<p>And here the result:</p>
+<pre><code>parser/file       time:   [30.932 us 32.062 us 33.348 us]
+                  thrpt:  [10.209 MiB/s 10.619 MiB/s 11.007 MiB/s]
+</code></pre>
+<p>You can see that the parser takes more time overall because it does additional work (building the parse tree, figuring out what to parse next), but runs at about the throughput of the slower of the two lexer results (a bit less, due to the extra work).
+We don't know for sure, but unless we've hit the exact performance of our parser with that of the lexer, it seems like our parser could do more if the lexer was lexing tokens more quickly.</p>
+<p>The aforementioned lexer rule optimizations are nothing I would do by hand.
+If we bring in <a href="https://crates.io/crates/rayon"><code>rayon</code></a> and try to &quot;manually&quot; run our rules in parallel <em>using concurrency</em>, this does the opposite of helping:</p>
+<pre><code>lexer/function    time:   [518.46 us 520.06 us 522.20 us]
+                  thrpt:  [443.21 KiB/s 445.04 KiB/s 446.41 KiB/s]
+           change:
+                  time:   [+5183.5% +5251.9% +5312.1%] (p = 0.00 &lt; 0.05)
+                  thrpt:  [-98.152% -98.132% -98.107%]
+                  Performance has regressed.
+
+lexer/struct      time:   [134.49 us 135.01 us 135.82 us]
+                  thrpt:  [251.66 KiB/s 253.16 KiB/s 254.14 KiB/s]
+           change:
+                  time:   [+5153.5% +5251.2% +5342.9%] (p = 0.00 &lt; 0.05)
+                  thrpt:  [-98.163% -98.131% -98.097%]
+                  Performance has regressed.
+</code></pre>
+<p>That does <strong>not</strong> look good!
+Threads have considerable overhead, so for something as small as our lexing this is not the way.</p>
+<p>Let's instead try an optimizing lexer generator.
+Unlike the entire zoo of parser generators, there is a clear winner for pure lexing:
+I think I have not met a single person not using <a href="https://crates.io/crates/logos"><code>logos</code></a> for this.
+We'll bring it in as a dependency</p>
+<pre><code class="language-toml" data-lang="toml">[dependencies]
+regex = &quot;1&quot;
+lazy_static = &quot;1&quot;
+logos = &quot;0.12&quot; # &lt;- NEW!
+</code></pre>
+<p>and set up a new <code>lexer</code> submodule to define a <code>logos</code> lexer:</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/generated.rs
+
+use super::TokenKind;
+use crate::T;
+use logos::Logos;
+
+#[derive(Logos, Debug, PartialEq, Eq)]
+pub(super) enum LogosToken {
+    #[token(&quot;.&quot;)]
+    Dot,
+    #[token(&quot;:&quot;)]
+    Colon,
+    #[token(&quot;,&quot;)]
+    Comma,
+    #[token(&quot;;&quot;)]
+    Semi,
+    #[token(&quot;+&quot;)]
+    Plus,
+    #[token(&quot;-&quot;)]
+    Minus,
+    #[token(&quot;*&quot;)]
+    Times,
+    #[token(&quot;/&quot;)]
+    Slash,
+    #[token(&quot;^&quot;)]
+    Pow,
+    #[token(&quot;=&quot;)]
+    Eq,
+    #[token(&quot;!&quot;)]
+    Bang,
+    #[token(&quot;&amp;&amp;&quot;)]
+    And,
+    #[token(&quot;||&quot;)]
+    Or,
+    #[token(&quot;==&quot;)]
+    Eqq,
+    #[token(&quot;!=&quot;)]
+    Neq,
+    #[token(&quot;&lt;=&quot;)]
+    Leq,
+    #[token(&quot;&gt;=&quot;)]
+    Geq,
+    #[token(&quot;_&quot;)]
+    Under,
+    // Brackets
+    #[token(&quot;&lt;&quot;)]
+    LAngle,
+    #[token(&quot;&gt;&quot;)]
+    RAngle,
+    #[token(&quot;(&quot;)]
+    LParen,
+    #[token(&quot;)&quot;)]
+    RParen,
+    #[token(&quot;[&quot;)]
+    LSquare,
+    #[token(&quot;]&quot;)]
+    RSquare,
+    #[token(&quot;{&quot;)]
+    LBrace,
+    #[token(&quot;}&quot;)]
+    RBrace,
+    // Constructs
+    #[regex(r#&quot;&quot;((\\&quot;|\\\\)|[^\\&quot;])*&quot;&quot;#)]
+    String,
+    #[regex(r#&quot;//[^\n]*\n&quot;#)]
+    LineComment,
+    #[regex(r#&quot;\d+&quot;#, priority = 2)]
+    Int,
+    #[regex(r#&quot;((\d+(\.\d+)?)|(\.\d+))([Ee](\+|-)?\d+)?&quot;#)]
+    Float,
+    #[regex(r#&quot;[A-Za-z]([A-Za-z]|_|\d)*&quot;#)]
+    Ident,
+
+    // Keywords
+    #[token(&quot;let&quot;)]
+    KwLet,
+    #[token(&quot;if&quot;)]
+    KwIf,
+    #[token(&quot;else&quot;)]
+    KwElse,
+    #[token(&quot;fn&quot;)]
+    KwFn,
+    #[token(&quot;struct&quot;)]
+    KwStruct,
+
+    // Misc
+    #[regex(r&quot;[ \t\r\n\f]+&quot;)]
+    WS,
+    #[error]
+    Error,
+}
+
+impl LogosToken {
+    #[rustfmt::skip]
+    pub fn kind(&amp;self) -&gt; TokenKind {
+        use LogosToken::*;
+        match self {
+            Dot          =&gt; T![.],
+            Colon        =&gt; T![:],
+            Comma        =&gt; T![,],
+            Semi         =&gt; T![;],
+            Plus         =&gt; T![+],
+            Minus        =&gt; T![-],
+            Times        =&gt; T![*],
+            Slash        =&gt; T![/],
+            Pow          =&gt; T![^],
+            Eq           =&gt; T![=],
+            Bang         =&gt; T![!],
+            And          =&gt; T![&amp;&amp;],
+            Or           =&gt; T![||],
+            Eqq          =&gt; T![==],
+            Neq          =&gt; T![!=],
+            Leq          =&gt; T![&lt;=],
+            Geq          =&gt; T![&gt;=],
+            Under        =&gt; T![_],
+            LAngle       =&gt; T![&lt;],
+            RAngle       =&gt; T![&gt;],
+            LParen       =&gt; T!['('],
+            RParen       =&gt; T![')'],
+            LSquare      =&gt; T!['['],
+            RSquare      =&gt; T![']'],
+            LBrace       =&gt; T!['{'],
+            RBrace       =&gt; T!['}'],
+            String       =&gt; T![string],
+            LineComment  =&gt; T![comment],
+            Int          =&gt; T![int],
+            Float        =&gt; T![float],
+            Ident        =&gt; T![ident],
+            KwLet        =&gt; T![let],
+            KwIf         =&gt; T![if],
+            KwElse       =&gt; T![else],
+            KwFn         =&gt; T![fn],
+            KwStruct     =&gt; T![struct],
+            WS           =&gt; T![ws],
+            Error        =&gt; T![error],
+        }
+    }
+}
+</code></pre>
+<p>In the main <code>lexer</code> module, we rename our old lexer to <code>CustomLexer</code> and implement a small <code>LogosLexer</code> that wraps the lexer generated by logos and maps <em>its</em> tokens to <em>our</em> tokens (so we don't have to change everything else):</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/mod.rs
+
+pub struct LogosLexer&lt;'input&gt; {
+    generated: logos::SpannedIter&lt;'input, LogosToken&gt;,
+    eof:       bool,
+}
+
+impl&lt;'input&gt; LogosLexer&lt;'input&gt; {
+    pub fn new(input: &amp;'input str) -&gt; Self {
+        Self {
+            generated: LogosToken::lexer(input).spanned(),
+            eof:       false,
+        }
+    }
+
+    pub fn tokenize(&amp;mut self) -&gt; Vec&lt;Token&gt; {
+        self.collect()
+    }
+}
+
+impl&lt;'input&gt; Iterator for LogosLexer&lt;'input&gt; {
+    type Item = Token;
+
+    fn next(&amp;mut self) -&gt; Option&lt;Self::Item&gt; {
+        match self.generated.next() {
+            Some((token, span)) =&gt; Some(Token {
+                kind: token.kind(),
+                span: span.into(),
+            }),
+            None if self.eof =&gt; None,
+            None =&gt; {
+                self.eof = true;
+                Some(Token {
+                    kind: T![EOF],
+                    span: (0..0).into(),
+                })
+            }
+        }
+    }
+}
+</code></pre>
+<p>The <code>spanned()</code> function that we call on the <code>LogosToken::lexer</code> generated for us by <code>logos</code> turns the generated lexer (which is also an iterator, like ours) into an iterator that yields pairs of <code>(token_kind, span)</code>.
+Because we have already defined a method to get the <code>TokenKind</code> of a <code>LogosToken</code>, these pairs are easy to convert to our <code>Token</code>s.
+The rest of the iterator implementation is similar to the <code>CustomLexer</code> one: running our rules is now replaced with calling the generated lexer, we stick an extra EOF token at the end, done.<sup class="footnote-reference"><a href="#logos-eof">4</a></sup><span id="fn-logos-eof"></span></p>
+<p>We can now quickly toggle between either lexer by defining the newly freed type name <code>Lexer</code> as an alias for the lexer we currently want:</p>
+<pre><code class="language-rust" data-lang="rust">// In lexer/mod.rs
+
+pub type Lexer&lt;'input&gt; = LogosLexer&lt;'input&gt;;
+// pub type Lexer&lt;'input&gt; = CustomLexer&lt;'input&gt;;
+</code></pre>
+<p>This should get us back to working.
+The <code>unknown_input</code> and the <code>token_spans</code> test will fail, because <code>logos</code> does not aggregate consecutive unknown tokens, but everything else should work.
+Time to see if using <code>logos</code> makes a difference.
+Let's run the benchmark again, with the alias set as above:</p>
+<pre><code>lexer/function          time:   [1.7565 us 1.7922 us 1.8295 us]
+                        thrpt:  [123.54 MiB/s 126.11 MiB/s 128.67 MiB/s]
+                 change:
+                        time:   [-82.441% -81.851% -81.304%] (p = 0.00 &lt; 0.05)
+                        thrpt:  [+434.87% +451.00% +469.50%]
+                        Performance has improved.
+
+lexer/struct            time:   [601.18 ns 609.49 ns 618.23 ns]
+                        thrpt:  [53.990 MiB/s 54.765 MiB/s 55.522 MiB/s]
+                 change:
+                        time:   [-76.353% -75.657% -74.984%] (p = 0.00 &lt; 0.05)
+                        thrpt:  [+299.74% +310.80% +322.89%]
+                        Performance has improved.
+
+parser/file             time:   [15.714 us 15.944 us 16.230 us]
+                        thrpt:  [20.977 MiB/s 21.354 MiB/s 21.667 MiB/s]
+                 change:
+                        time:   [-44.596% -41.849% -38.840%] (p = 0.00 &lt; 0.05)
+                        thrpt:  [+63.505% +71.965% +80.493%]
+</code></pre>
+<p>That's a 3x to 4.5x improvement for the lexer!
+Interestingly, function definitions still have about twice as much throughput as struct definitions.
+Our parser also got a nice boost, though the improvement is noticeably smaller.
+I did not aim for efficiency in this post, but rather understandability, and it's showing a bit.</p>
+<p>We still see, however, the parse time being almost cut in half, even though we didn't make a single change to the parser.
+This means that indeed the lexer was slowing us down previously, and is not anymore when using the lexer generated by <code>logos</code>.
+Because you can do whatever you can think of in the <code>LogosLexer</code> wrapper that we defined, <code>logos</code> is a very viable choice to use under the hood of your hand-written parser implementation.</p>
+<h2 id="terms-and-conditions"><a class="zola-anchor" href="#terms-and-conditions" aria-label="Anchor link for: terms-and-conditions">🔗</a>Terms and Conditions</h2>
+<p>There are a lot of parsing techniques, parser generators and just language-related concepts out there, and if you're now continuing on your own language adventures you'll surely come across many of them.
+If you're looking for something specific, or maybe just so you've heard these names before and have a rough idea what they mean, here's a small list of things you might encounter:</p>
+<ul>
+<li>
+<p>The most general description of a language is a <em>grammar</em>. 
+Because &quot;literally any grammar&quot; is quite a lot, and definitely includes languages that are really hard to handle algorithmically, the first subset of languages we often restrict ourselves to is the class of the <a href="https://en.m.wikipedia.org/wiki/Context-free_grammar">context-free grammars</a> (CFGs). 
+These consist of <em>non-terminal</em> symbols that represent things in your language like <code>Expr</code> or <code>Type</code>, with rules how to transform them into sequences of other non-terminals or <em>terminals</em>. 
+A terminal defines the concrete syntax of something, like an identifier or a semicolon <code>;</code>. </p>
+<p>Grammar rules for CFGs are usually written down in some version of <a href="https://en.m.wikipedia.org/wiki/Extended_Backus%E2%80%93Naur_form">EBNF</a>, but you'll probably be able to read most notations that follow a <code>Thing -&gt; Some Combination &quot;of&quot; OtherThings+ &quot;;&quot;</code> notation.
+Many notations include some features from regular expressions to be more concise.
+Our struct definitions, for example, would look like <code>StructDefn -&gt; &quot;struct&quot; Type &quot;{&quot; (Member &quot;,&quot;)* Member? &quot;}&quot;</code>.</p>
+</li>
+<li>
+<p>Moving to parsers, you will probably see LL(k) and LR(k) parsers or parser generators.
+<a href="https://en.m.wikipedia.org/wiki/LL_parser">LL parsers</a> work very much in a similar way to our hand-written parser, but use a more general mechanism to determine which language element needs to be parsed next (compared to us hard-coding this for, e.g., function and struct declarations).</p>
+<p><a href="https://en.m.wikipedia.org/wiki/LR_parser">LR parsers</a> are a kind of bottom-up parser and work very differently.
+They have a stack onto which they push terminal symbols, and when they've seen enough terminals to put together a full grammar rule they apply the rule &quot;in reverse&quot;, pop all the terminals and replace them with the non-terminal on the left-hand side of the rule.</p>
+<p>For both LL(k) and LR(k) parsers, the k is the number of tokens they are allowed to <code>peek</code>.
+In our case, k is 1 - we only ever look at the very next token after the current.
+Languages that can be parsed with LL(k) and LR(k) are a subset of the languages that you can express with CFGs, so your grammar must be <em>unambiguous</em> with k tokens of look-ahead when you want to use one of these parsers.
+LL(k) is a subset of LR(k), but only if the k is the same.
+In practice, k is often 1 for generators as well.</p>
+</li>
+<li>
+<p>While LL parsers are mostly used as-is, for LR parsers people have developed several &quot;restricted&quot; versions that allow more efficient parsers, but can handle less languages than full LR.
+The first level are <a href="https://en.m.wikipedia.org/wiki/LALR_parser">LALR(k) parsers</a>.
+<a href="https://en.m.wikipedia.org/wiki/Simple_LR_parser">SLR(k) parsers</a> accept an even smaller set of languages.</p>
+</li>
+<li>
+<p><a href="https://en.m.wikipedia.org/wiki/Parsing_expression_grammar">Parsing expression grammars</a>, or PEGs, are a different formalism that look a lot like CFGs, but add some requirements on how to parse grammars that would otherwise be ambiguous.
+They have some <a href="https://en.m.wikipedia.org/wiki/Parsing_expression_grammar#Ambiguity_detection_and_influence_of_rule_order_on_language_that_is_matched">fun quirks</a>, are otherwise fine to use, but are about as good or bad at parsing expressions than other parser generators. There's some Rust ones on <a href="https://github.com/Kixiron/rust-langdev#parsers">the list</a> if you wanna try one out.</p>
+</li>
+</ul>
+<h2 id="a-note-on-error-handling"><a class="zola-anchor" href="#a-note-on-error-handling" aria-label="Anchor link for: a-note-on-error-handling">🔗</a>A Note on Error Handling</h2>
+<p>As we have written it now, our parser will <code>panic</code> when it encounters something it doesn't understand.
+This is something all of us do from time to time, and there's no need to be ashamed about it.
+Learning something new is hard, and if you've made it through this entire post as a beginner, then you have pushed the boundaries of your comfort zone more than enough for a day, so give yourselves some well-earned rest and maybe have some fun playing around with what we have made.</p>
+<p>To wrap this back around to parsing; a &quot;real&quot; parser of course can't just crash on error.
+If the parser is for a compiler, for which invalid input programs are useless, it may stop parsing, but it shouldn't just die.
+Considering the user experience of using our parser is also important to consider.
+We are all spoiled by Rust's tooling, which we will not be able to &quot;just&quot; / quickly imitate.
+But some kind of user-facing errors are a must for any parser, and you should always strive to give the best feedback you can when something fails.</p>
+<p>For our parser, this post is already very long and I don't want to shove an even more overwhelming amount of information down you people's throats.
+If this is received well, adapting our parser to handle errors could be a nice topic for a follow-up article.
+Until then, try not to panic when you're hitting a wall on your language development journey.
+If you do get stuck somewhere, remember that there is always someone around in the community that can and will be happy to help you.
+And instead of banging your head against that wall, maybe go outside, look at some real trees, and ponder why they are upside down.</p>
+<hr />
+<div class="footnote-definition" id="stmt-expr"><sup class="footnote-definition-label">1</sup>
+<p>In Rust, this is somewhat confusing, because most expressions can also be statements. For example, you can <code>break</code> a value from a <code>loop</code>. <a href="#fn-stmt-expr" class="footnote-backref" role="doc-backlink">↩︎</a></p>
+</div>
+<div class="footnote-definition" id="shift-ops"><sup class="footnote-definition-label">2</sup>
+<p>We will not add binary left- and right-shift operators (<code>&lt;&lt;</code> and <code>&gt;&gt;</code>) in this post, but if we did they'd be another source of ambiguity here. <a href="#fn-shift-ops" class="footnote-backref" role="doc-backlink">↩︎</a></p>
+</div>
+<div class="footnote-definition" id="max-munch"><sup class="footnote-definition-label">3</sup>
+<p>Be careful for which character sequences you introduce combined lexer tokens. Equality operators are usually fine, but for some character combinations munching them maximally may clash with other viable implementations. See the &quot;Drawbacks&quot; section of the Wikipedia article for some examples. <a href="#fn-max-munch" class="footnote-backref" role="doc-backlink">↩︎</a></p>
+</div>
+<div class="footnote-definition" id="logos-eof"><sup class="footnote-definition-label">4</sup>
+<p>I just stuck in <code>(0..0)</code> as the span of the EOF token, mostly because we don't actually use that span anywhere and I couldn't be bothered. Since we have access to all previous spans, it is also not difficult to track the end of the last span and then go from there. Take that as an exercise for the reader, if you want. <a href="#fn-logos-eof" class="footnote-backref" role="doc-backlink">↩︎</a></p>
+</div>
+
+
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <div class="footer-table">
+            <div class="footer-name">
+                <p>Domenic Quirl</p>
+            </div>
+            <div class="footer-socials">
+                <ul class="socials-list">
+                    <li>
+                        <a href="https://github.com/domenicquirl/blog">
+                            <span class="icon icon--github"><svg viewBox="0 0 16 16" width="16px" height="16px">
+                                    <path fill="#828282"
+                                        d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z" />
+                                </svg></span>
+                            <span>Blog Repository</span>
+                        </a>
+                    </li>
+                    <li>
+                        <a href="https://github.com/domenicquirl">
+                            <span class="icon icon--github"><svg viewBox="0 0 16 16" width="16px" height="16px">
+                                    <path fill="#828282"
+                                        d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z" />
+                                </svg></span>
+                            <span>domenicquirl</span>
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </footer>
+
+</body>
+
+</html>
